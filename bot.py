@@ -1,11 +1,9 @@
 """
-Gozo Ferry Bot — Telegram bot for the Mġarr ↔ Ċirkewwa ferry schedule.
+Gozo Ferry Bot — Telegram bot combining two ferry operators:
+  • Gozo Channel (car ferry, Ċirkewwa ↔ Mġarr)    — static.gozochannel.com JSON
+  • Gozo Fast Ferry (passenger, Valletta ↔ Mġarr) — gozohighspeed.com REST API
 
-Sources:
-- Primary: live daily schedule from static.gozochannel.com (per-date JSON)
-- Fallback: bundled schedule.json (weekday/weekend approximation)
-- Sea conditions: Open-Meteo Marine + Forecast API (free, no key)
-
+Sea conditions from Open-Meteo (Marine + Forecast APIs).
 Webhook mode (for Render / any Web Service).
 """
 
@@ -48,14 +46,19 @@ PORT = int(os.environ.get("PORT", "8080"))
 MALTA_TZ = ZoneInfo("Europe/Malta")
 SCHEDULE_FILE = Path(__file__).parent / "schedule.json"
 
-# Midpoint of the Malta–Gozo channel
 CHANNEL_LAT = 36.015
 CHANNEL_LON = 14.296
 
+# Fast Ferry seat thresholds
+FEW_SEATS_THRESHOLD = 30
+
 # Caches
-_live_schedule_cache: dict[str, dict] = {}  # key: "YYYY-MM-DD"
+_live_schedule_cache: dict[str, dict] = {}            # Gozo Channel, key: date iso
+_fast_ferry_cache: dict[tuple, tuple[list, float]] = {}  # (dep, arr, date_iso) → (trips, ts)
+FAST_FERRY_TTL = 300  # 5 min (seats change as people book)
+
 _weather_cache: dict = {"data": None, "ts": 0.0}
-WEATHER_TTL = 600  # seconds
+WEATHER_TTL = 600
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -64,10 +67,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# --- Live schedule fetching ---
+# --- Gozo Channel schedule (live JSON) ---
 async def fetch_live_schedule(date_obj: date_cls) -> dict | None:
-    """Fetch passenger.json from Gozo Channel CDN for a given date.
-    Cached per-date in memory. Returns None on failure."""
     cache_key = date_obj.isoformat()
     if cache_key in _live_schedule_cache:
         return _live_schedule_cache[cache_key]
@@ -82,7 +83,7 @@ async def fetch_live_schedule(date_obj: date_cls) -> dict | None:
             r.raise_for_status()
             data = r.json()
             _live_schedule_cache[cache_key] = data
-            logger.info("Fetched live schedule for %s", cache_key)
+            logger.info("Fetched Gozo Channel schedule for %s", cache_key)
             return data
     except Exception as e:
         logger.warning("Live schedule fetch failed for %s: %s", cache_key, e)
@@ -93,9 +94,8 @@ def _parse_times_with_rollover(
     times_list: list[dict], base_date: date_cls
 ) -> list[datetime]:
     """
-    Convert [{name: 'HH:MM', ...}, ...] into list of timezone-aware datetimes.
-    Handles the rollover: when a time is less than the previous one,
-    we've crossed midnight into the next calendar day.
+    Convert [{name: 'HH:MM', ...}, ...] into tz-aware datetimes.
+    When a time is less than the previous one, we've crossed midnight.
     """
     result: list[datetime] = []
     current_date = base_date
@@ -116,7 +116,6 @@ def _parse_times_with_rollover(
     return result
 
 
-# --- Fallback (bundled) schedule ---
 def _load_fallback_schedule() -> dict:
     with open(SCHEDULE_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -136,14 +135,10 @@ def _fallback_departures(direction: str, for_date: date_cls) -> list[datetime]:
     ]
 
 
-# --- Unified schedule interface ---
-async def get_departures(
+async def get_gc_departures(
     direction: str, for_date: date_cls
 ) -> tuple[list[datetime], dict]:
-    """
-    Returns (all departures for given date, metadata).
-    metadata = {"source": "live"|"fallback", "is_holiday": bool}
-    """
+    """Gozo Channel departures for a date. Metadata: source, is_holiday."""
     live = await fetch_live_schedule(for_date)
     if live is not None:
         key = "mgarr" if direction == "mgarr_to_cirkewwa" else "cirkewwa"
@@ -152,19 +147,109 @@ async def get_departures(
             "source": "live",
             "is_holiday": live.get("is_holiday", False),
         }
+    return _fallback_departures(direction, for_date), {
+        "source": "fallback",
+        "is_holiday": False,
+    }
 
-    # Fallback
-    departures = _fallback_departures(direction, for_date)
-    return departures, {"source": "fallback", "is_holiday": False}
 
-
-async def next_departures(
+async def next_gc_departures(
     direction: str, now: datetime, limit: int = 3
 ) -> tuple[list[datetime], dict]:
-    """Next `limit` departures after `now`, plus schedule metadata."""
-    departures, meta = await get_departures(direction, now.date())
+    departures, meta = await get_gc_departures(direction, now.date())
     future = [d for d in departures if d > now][:limit]
     return future, meta
+
+
+# --- Gozo Fast Ferry (REST API) ---
+FF_VALLETTA = "Valletta"
+FF_MGARR = "Imgarr (Gozo)"
+
+
+async def fetch_fast_ferry(
+    departing: str, arriving: str, for_date: date_cls
+) -> list[dict] | None:
+    """
+    Fetches Fast Ferry trips for a date. Returns list of
+    {departing: datetime, vessel: str, seats: int}.
+    """
+    cache_key = (departing, arriving, for_date.isoformat())
+    now_ts = time.time()
+    cached = _fast_ferry_cache.get(cache_key)
+    if cached and now_ts - cached[1] < FAST_FERRY_TTL:
+        return cached[0]
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                "https://gozohighspeed.com/api/Trip",
+                params={
+                    "departingHarbor": departing,
+                    "arrivingHarbor": arriving,
+                    "date": for_date.isoformat(),
+                },
+            )
+            r.raise_for_status()
+            raw = r.json()
+
+            trips = []
+            for item in raw:
+                voyages = item.get("voyages") or []
+                v = voyages[0] if voyages else {}
+                dt = datetime.fromisoformat(item["departingTime"]).replace(
+                    tzinfo=MALTA_TZ
+                )
+                trips.append({
+                    "departing": dt,
+                    "vessel": v.get("vesselName") or "",
+                    "seats": v.get("seatsEconomy", -1),
+                })
+            _fast_ferry_cache[cache_key] = (trips, now_ts)
+            logger.info(
+                "Fetched Fast Ferry %s → %s for %s (%d trips)",
+                departing, arriving, for_date, len(trips),
+            )
+            return trips
+    except Exception as e:
+        logger.warning(
+            "Fast Ferry fetch failed for %s → %s on %s: %s",
+            departing, arriving, for_date, e,
+        )
+        return None
+
+
+async def next_fast_ferry(
+    departing: str, arriving: str, now: datetime, limit: int = 3
+) -> list[dict]:
+    today_trips = await fetch_fast_ferry(departing, arriving, now.date()) or []
+    future = [t for t in today_trips if t["departing"] > now]
+
+    if len(future) < limit:
+        tomorrow_trips = await fetch_fast_ferry(
+            departing, arriving, now.date() + timedelta(days=1)
+        ) or []
+        future.extend(tomorrow_trips[: limit - len(future)])
+
+    return future[:limit]
+
+
+def seat_warning(seats: int) -> str:
+    if seats < 0:
+        return ""  # unknown
+    if seats == 0:
+        return "  ❌ Fully booked"
+    if seats < FEW_SEATS_THRESHOLD:
+        return f"  ⚠️ {seats} seats left"
+    return ""
+
+
+def format_fast_ferry_line(trip: dict, now: datetime, prefix: str) -> str:
+    dt = trip["departing"]
+    line = f"{prefix} {dt.strftime('%H:%M')} ({format_delta(dt - now)})"
+    if trip["vessel"]:
+        line += f" — {trip['vessel']}"
+    line += seat_warning(trip["seats"])
+    return line
 
 
 # --- Helpers ---
@@ -184,13 +269,11 @@ def detect_island(lat: float, lon: float) -> str | None:
     return "gozo" if lat >= 36.00 else "malta"
 
 
-ISLAND_TO_DIRECTION = {
-    "gozo": ("mgarr_to_cirkewwa", "Mġarr → Ċirkewwa", "Gozo"),
-    "malta": ("cirkewwa_to_mgarr", "Ċirkewwa → Mġarr", "Malta"),
-}
+def holiday_banner(meta: dict) -> str:
+    return "🎉 _Public holiday schedule_\n\n" if meta.get("is_holiday") else ""
 
 
-# --- Weather / sea-comfort ---
+# --- Weather ---
 async def fetch_sea_conditions() -> dict | None:
     now_ts = time.time()
     if _weather_cache["data"] and now_ts - _weather_cache["ts"] < WEATHER_TTL:
@@ -217,7 +300,6 @@ async def fetch_sea_conditions() -> dict | None:
             )
             marine.raise_for_status()
             forecast.raise_for_status()
-
             data = {
                 "wave_height_m": marine.json()["current"].get("wave_height"),
                 "wind_kts": forecast.json()["current"]["wind_speed_10m"],
@@ -234,8 +316,7 @@ async def fetch_sea_conditions() -> dict | None:
 def degrees_to_compass(deg: float) -> str:
     dirs = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
             "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
-    ix = int((deg / 22.5) + 0.5) % 16
-    return dirs[ix]
+    return dirs[int((deg / 22.5) + 0.5) % 16]
 
 
 def comfort_assessment(wind_kts: float, wave_m: float | None) -> str:
@@ -259,7 +340,6 @@ def comfort_assessment(wind_kts: float, wave_m: float | None) -> str:
             mood = "🟠 Fresh wind — expect motion"
         else:
             mood = "🔴 Strong wind — rough crossing"
-
     if wind_kts >= 28:
         mood += " ⚠️ high wind"
     return mood
@@ -268,30 +348,27 @@ def comfort_assessment(wind_kts: float, wave_m: float | None) -> str:
 def format_conditions(data: dict | None) -> str:
     if not data:
         return ""
-
     wind_kts = data["wind_kts"]
     wind_dir = degrees_to_compass(data["wind_dir"])
     wave_m = data.get("wave_height_m")
-
     line = f"🌬 {wind_kts:.1f} kts {wind_dir}"
     if wave_m is not None:
         line += f"  •  🌊 {wave_m:.1f} m waves"
-
     return f"\n{line}\n{comfort_assessment(wind_kts, wave_m)}"
 
 
-def holiday_banner(meta: dict) -> str:
-    return "🎉 _Public holiday schedule_\n\n" if meta.get("is_holiday") else ""
-
-
-# --- Command handlers ---
+# --- Conversation flow: /next → location → car/foot → result ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "🛳 *Gozo ↔ Malta Ferry Schedule*\n\n"
+        "🛳 *Gozo ↔ Malta Ferries*\n\n"
+        "I track two operators:\n"
+        "  • *Gozo Channel* — car ferry, Ċirkewwa ↔ Mġarr (~25 min)\n"
+        "  • *Fast Ferry* — passenger only, Valletta ↔ Mġarr (~45 min)\n\n"
         "Commands:\n"
-        "/next — next ferry (I'll figure out the direction from your location)\n"
-        "/mgarr — next 3 departures from Mġarr → Ċirkewwa\n"
-        "/cirkewwa — next 3 departures from Ċirkewwa → Mġarr\n"
+        "/next — next ferry from your location\n"
+        "/mgarr — next 3 Gozo Channel from Mġarr\n"
+        "/cirkewwa — next 3 Gozo Channel from Ċirkewwa\n"
+        "/fastferry — next Fast Ferry in both directions\n"
         "/today — full schedule for today\n"
         "/sea — current sea conditions"
     )
@@ -299,6 +376,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def next_both(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("pending_island", None)
     keyboard = [
         [KeyboardButton("📍 Share location", request_location=True)],
         [KeyboardButton("🏝 I'm on Gozo"), KeyboardButton("🇲🇹 I'm on Malta")],
@@ -307,35 +385,21 @@ async def next_both(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         keyboard, resize_keyboard=True, one_time_keyboard=True
     )
     await update.message.reply_text(
-        "Where are you sailing from? Share your location and I'll figure it out.",
+        "Where are you sailing from?",
         reply_markup=markup,
     )
 
 
-async def _send_next_from_island(update: Update, island: str) -> None:
-    direction, label, island_name = ISLAND_TO_DIRECTION[island]
-    now = datetime.now(MALTA_TZ)
-    deps, meta = await next_departures(direction, now, limit=3)
-
-    if not deps:
-        await update.message.reply_text(
-            f"You're on {island_name}. No upcoming ferries found.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return
-
-    lines = [
-        holiday_banner(meta) + f"📍 You're on {island_name} → *{label}*\n"
+async def _ask_mode(update: Update) -> None:
+    keyboard = [
+        [KeyboardButton("🚗 With a car"), KeyboardButton("🚶 On foot")],
     ]
-    for i, d in enumerate(deps):
-        prefix = "➡️" if i == 0 else "  •"
-        lines.append(f"{prefix} {d.strftime('%H:%M')} ({format_delta(d - now)})")
-
-    conditions = await fetch_sea_conditions()
-    lines.append(format_conditions(conditions))
-
+    markup = ReplyKeyboardMarkup(
+        keyboard, resize_keyboard=True, one_time_keyboard=True
+    )
     await update.message.reply_text(
-        "\n".join(lines), parse_mode="Markdown", reply_markup=ReplyKeyboardRemove()
+        "Got it. Travelling with a car or on foot?",
+        reply_markup=markup,
     )
 
 
@@ -348,26 +412,95 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_markup=ReplyKeyboardRemove(),
         )
         return
-    await _send_next_from_island(update, island)
+    context.user_data["pending_island"] = island
+    await _ask_mode(update)
 
 
-async def handle_island_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text.lower()
-    if "gozo" in text:
-        await _send_next_from_island(update, "gozo")
-    elif "malta" in text:
-        await _send_next_from_island(update, "malta")
+    pending = context.user_data.get("pending_island")
 
-
-async def _next_direction(update: Update, direction: str, label: str) -> None:
-    now = datetime.now(MALTA_TZ)
-    deps, meta = await next_departures(direction, now, limit=3)
-
-    if not deps:
-        await update.message.reply_text(f"No upcoming ferries {label}.")
+    # Step 2: mode selection (island already known)
+    if pending and ("car" in text or "foot" in text):
+        mode = "car" if "car" in text else "foot"
+        context.user_data.pop("pending_island", None)
+        await _send_results(update, pending, mode)
         return
 
-    lines = [holiday_banner(meta) + f"🛳 *{label}*\n"]
+    # Step 1: island selection
+    if "gozo" in text:
+        context.user_data["pending_island"] = "gozo"
+        await _ask_mode(update)
+    elif "malta" in text:
+        context.user_data["pending_island"] = "malta"
+        await _ask_mode(update)
+
+
+async def _send_results(update: Update, island: str, mode: str) -> None:
+    now = datetime.now(MALTA_TZ)
+
+    if island == "gozo":
+        gc_deps, gc_meta = await next_gc_departures("mgarr_to_cirkewwa", now, limit=3)
+        ff_deps = (
+            await next_fast_ferry(FF_MGARR, FF_VALLETTA, now, limit=3)
+            if mode == "foot" else []
+        )
+        island_label = "Gozo"
+        gc_label = "Gozo Channel — Mġarr → Ċirkewwa"
+        ff_label = "Fast Ferry — Mġarr → Valletta"
+    else:  # malta
+        gc_deps, gc_meta = await next_gc_departures("cirkewwa_to_mgarr", now, limit=3)
+        ff_deps = (
+            await next_fast_ferry(FF_VALLETTA, FF_MGARR, now, limit=3)
+            if mode == "foot" else []
+        )
+        island_label = "Malta"
+        gc_label = "Gozo Channel — Ċirkewwa → Mġarr"
+        ff_label = "Fast Ferry — Valletta → Mġarr"
+
+    mode_label = "with a car" if mode == "car" else "on foot"
+    lines = [
+        holiday_banner(gc_meta)
+        + f"📍 You're on {island_label} ({mode_label})\n"
+    ]
+
+    # Gozo Channel
+    lines.append(f"🛳 *{gc_label}* (~25 min)")
+    if gc_deps:
+        for i, d in enumerate(gc_deps):
+            prefix = "➡️" if i == 0 else "  •"
+            lines.append(f"{prefix} {d.strftime('%H:%M')} ({format_delta(d - now)})")
+    else:
+        lines.append("  No more today")
+
+    # Fast Ferry (only for "on foot")
+    if mode == "foot":
+        lines.append(f"\n⚡️ *{ff_label}* (~45 min)")
+        if ff_deps:
+            for i, t in enumerate(ff_deps):
+                prefix = "➡️" if i == 0 else "  •"
+                lines.append(format_fast_ferry_line(t, now, prefix))
+        else:
+            lines.append("  No more today")
+
+    conditions = await fetch_sea_conditions()
+    lines.append(format_conditions(conditions))
+
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="Markdown", reply_markup=ReplyKeyboardRemove()
+    )
+
+
+# --- Gozo Channel direction-specific commands ---
+async def _next_gc_direction(update: Update, direction: str, label: str) -> None:
+    now = datetime.now(MALTA_TZ)
+    deps, meta = await next_gc_departures(direction, now, limit=3)
+
+    if not deps:
+        await update.message.reply_text(f"No upcoming Gozo Channel ferries {label}.")
+        return
+
+    lines = [holiday_banner(meta) + f"🛳 *Gozo Channel — {label}*\n"]
     for i, d in enumerate(deps):
         prefix = "➡️" if i == 0 else "  •"
         lines.append(f"{prefix} {d.strftime('%H:%M')} ({format_delta(d - now)})")
@@ -379,36 +512,75 @@ async def _next_direction(update: Update, direction: str, label: str) -> None:
 
 
 async def next_mgarr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _next_direction(update, "mgarr_to_cirkewwa", "Mġarr → Ċirkewwa")
+    await _next_gc_direction(update, "mgarr_to_cirkewwa", "Mġarr → Ċirkewwa")
 
 
 async def next_cirkewwa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _next_direction(update, "cirkewwa_to_mgarr", "Ċirkewwa → Mġarr")
+    await _next_gc_direction(update, "cirkewwa_to_mgarr", "Ċirkewwa → Mġarr")
 
 
+# --- Fast Ferry command ---
+async def fastferry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    now = datetime.now(MALTA_TZ)
+    to_gozo = await next_fast_ferry(FF_VALLETTA, FF_MGARR, now, limit=3)
+    to_valletta = await next_fast_ferry(FF_MGARR, FF_VALLETTA, now, limit=3)
+
+    lines = ["⚡️ *Gozo Fast Ferry* — passenger only (~45 min)\n"]
+
+    lines.append("*Valletta → Mġarr*")
+    if to_gozo:
+        for i, t in enumerate(to_gozo):
+            prefix = "➡️" if i == 0 else "  •"
+            lines.append(format_fast_ferry_line(t, now, prefix))
+    else:
+        lines.append("  No upcoming trips")
+
+    lines.append("\n*Mġarr → Valletta*")
+    if to_valletta:
+        for i, t in enumerate(to_valletta):
+            prefix = "➡️" if i == 0 else "  •"
+            lines.append(format_fast_ferry_line(t, now, prefix))
+    else:
+        lines.append("  No upcoming trips")
+
+    lines.append("\n_Bookings may be required — check gozohighspeed.com_")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# --- Today and Sea ---
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     now = datetime.now(MALTA_TZ)
     today_date = now.date()
 
-    m_deps, meta = await get_departures("mgarr_to_cirkewwa", today_date)
-    c_deps, _ = await get_departures("cirkewwa_to_mgarr", today_date)
-
-    # For /today, show only times that fall on today's calendar date
-    # (drop the next-day rollover entries at the tail of the list)
+    m_deps, meta = await get_gc_departures("mgarr_to_cirkewwa", today_date)
+    c_deps, _ = await get_gc_departures("cirkewwa_to_mgarr", today_date)
     m_today = [d.strftime("%H:%M") for d in m_deps if d.date() == today_date]
     c_today = [d.strftime("%H:%M") for d in c_deps if d.date() == today_date]
 
+    ff_to_gozo = await fetch_fast_ferry(FF_VALLETTA, FF_MGARR, today_date) or []
+    ff_to_valletta = await fetch_fast_ferry(FF_MGARR, FF_VALLETTA, today_date) or []
+    ff_to_gozo_times = [t["departing"].strftime("%H:%M") for t in ff_to_gozo]
+    ff_to_valletta_times = [t["departing"].strftime("%H:%M") for t in ff_to_valletta]
+
     weekday_name = now.strftime("%A")
-    text = (
-        f"{holiday_banner(meta)}"
-        f"📅 *Today's schedule* ({weekday_name})\n\n"
-        f"🛳 *Mġarr → Ċirkewwa* ({len(m_today)} trips):\n"
-        f"{', '.join(m_today)}\n\n"
-        f"🛳 *Ċirkewwa → Mġarr* ({len(c_today)} trips):\n"
-        f"{', '.join(c_today)}"
-    )
+    parts = [
+        holiday_banner(meta) + f"📅 *Today's schedule* ({weekday_name})\n",
+        f"🛳 *Gozo Channel — Mġarr → Ċirkewwa* ({len(m_today)} trips)",
+        ", ".join(m_today) or "—",
+        "",
+        f"🛳 *Gozo Channel — Ċirkewwa → Mġarr* ({len(c_today)} trips)",
+        ", ".join(c_today) or "—",
+        "",
+        f"⚡️ *Fast Ferry — Valletta → Mġarr* ({len(ff_to_gozo_times)} trips)",
+        ", ".join(ff_to_gozo_times) or "No service today",
+        "",
+        f"⚡️ *Fast Ferry — Mġarr → Valletta* ({len(ff_to_valletta_times)} trips)",
+        ", ".join(ff_to_valletta_times) or "No service today",
+    ]
+    text = "\n".join(parts)
     if meta.get("source") == "fallback":
-        text += "\n\n_⚠️ Using fallback schedule — live source unavailable._"
+        text += "\n\n_⚠️ Gozo Channel: using fallback schedule._"
 
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -438,7 +610,7 @@ async def sea(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-# --- Launch (webhook) ---
+# --- Launch ---
 def main() -> None:
     app = Application.builder().token(TOKEN).build()
 
@@ -446,15 +618,11 @@ def main() -> None:
     app.add_handler(CommandHandler("next", next_both))
     app.add_handler(CommandHandler("mgarr", next_mgarr))
     app.add_handler(CommandHandler("cirkewwa", next_cirkewwa))
+    app.add_handler(CommandHandler("fastferry", fastferry))
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("sea", sea))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Regex(r"(?i)(gozo|malta)"),
-            handle_island_text,
-        )
-    )
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     webhook_path = TOKEN
     full_webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{webhook_path}"
