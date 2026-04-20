@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: gozo-ferry-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false  # встановити вручну в Render Dashboard
+      - key: PYTHON_VERSION
+        value: 3.12.3

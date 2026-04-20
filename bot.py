@@ -1,5 +1,6 @@
 """
 Gozo Ferry Bot — Telegram-бот для розкладу порому Mgarr ↔ Cirkewwa.
+Webhook-режим (для Render / будь-якого Web Service).
 """
 
 import json
@@ -30,6 +31,17 @@ if not TOKEN:
         "Встановіть змінну середовища TELEGRAM_BOT_TOKEN з токеном від @BotFather"
     )
 
+# Повний публічний URL сервісу, напр. https://gozo-ferry-bot.onrender.com
+# На Render це значення є в env-змінній RENDER_EXTERNAL_URL автоматично.
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+if not WEBHOOK_URL:
+    raise RuntimeError(
+        "Встановіть WEBHOOK_URL (повний https://... URL вашого сервісу)"
+    )
+
+# Render сам передає порт через env PORT
+PORT = int(os.environ.get("PORT", "8080"))
+
 MALTA_TZ = ZoneInfo("Europe/Malta")
 SCHEDULE_FILE = Path(__file__).parent / "schedule.json"
 
@@ -58,25 +70,19 @@ def parse_time(date, time_str: str) -> datetime:
 
 
 def next_departures(direction: str, now: datetime, limit: int = 3) -> list[datetime]:
-    """
-    Наступні `limit` відправлень у заданому напрямку після `now`.
-    direction: 'mgarr_to_cirkewwa' або 'cirkewwa_to_mgarr'.
-    """
+    """Наступні `limit` відправлень у заданому напрямку після `now`."""
     schedule = load_schedule()
     result: list[datetime] = []
 
-    # Перевіряємо сьогодні та завтра (щоб охопити пізній вечір → раннє утро)
     for day_offset in range(2):
         day = (now + timedelta(days=day_offset)).date()
         times = schedule[direction][get_day_type(day)]
-
         for t in times:
             departure = parse_time(day, t)
             if departure > now:
                 result.append(departure)
                 if len(result) >= limit:
                     return result
-
     return result
 
 
@@ -91,18 +97,12 @@ def format_delta(delta: timedelta) -> str:
 
 
 def detect_island(lat: float, lon: float) -> str | None:
-    """
-    Визначає острів за координатами.
-    Повертає 'gozo', 'malta' або None (якщо точка не в Мальтійському архіпелазі).
-    Кордон: ~36.00°N розділяє Мальту від Гоцо/Коміно.
-    """
-    # Груба обмежувальна рамка для Мальти + Гоцо + Коміно
+    """Визначає острів за координатами. ~36.00°N — кордон."""
     if not (35.78 <= lat <= 36.10 and 14.15 <= lon <= 14.58):
         return None
     return "gozo" if lat >= 36.00 else "malta"
 
 
-# Звідки → який напрямок розкладу потрібен
 ISLAND_TO_DIRECTION = {
     "gozo": ("mgarr_to_cirkewwa", "Mgarr → Cirkewwa", "Гоцо"),
     "malta": ("cirkewwa_to_mgarr", "Cirkewwa → Mgarr", "Мальті"),
@@ -123,7 +123,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def next_both(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показує клавіатуру для вибору острова (автоматично чи вручну)."""
     keyboard = [
         [KeyboardButton("📍 Поділитися локацією", request_location=True)],
         [KeyboardButton("🏝 Я на Гоцо"), KeyboardButton("🇲🇹 Я на Мальті")],
@@ -138,7 +137,6 @@ async def next_both(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _send_next_from_island(update: Update, island: str) -> None:
-    """Відправляє найближчі пороми з обраного острова."""
     direction, label, island_name = ISLAND_TO_DIRECTION[island]
     now = datetime.now(MALTA_TZ)
     deps = next_departures(direction, now, limit=3)
@@ -156,30 +154,23 @@ async def _send_next_from_island(update: Update, island: str) -> None:
         lines.append(f"{prefix} {d.strftime('%H:%M')} ({format_delta(d - now)})")
 
     await update.message.reply_text(
-        "\n".join(lines),
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove(),
+        "\n".join(lines), parse_mode="Markdown", reply_markup=ReplyKeyboardRemove()
     )
 
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обробляє надіслану геолокацію."""
     loc = update.message.location
     island = detect_island(loc.latitude, loc.longitude)
-
     if island is None:
         await update.message.reply_text(
-            "Здається, ви не на Мальті чи Гоцо 🤔\n"
-            "Оберіть острів вручну: /next",
+            "Здається, ви не на Мальті чи Гоцо 🤔\nОберіть острів вручну: /next",
             reply_markup=ReplyKeyboardRemove(),
         )
         return
-
     await _send_next_from_island(update, island)
 
 
 async def handle_island_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обробляє натискання кнопок «Я на Гоцо / Мальті»."""
     text = update.message.text.lower()
     if "гоцо" in text:
         await _send_next_from_island(update, "gozo")
@@ -187,11 +178,7 @@ async def handle_island_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _send_next_from_island(update, "malta")
 
 
-async def _next_direction(
-    update: Update,
-    direction: str,
-    label: str,
-) -> None:
+async def _next_direction(update: Update, direction: str, label: str) -> None:
     now = datetime.now(MALTA_TZ)
     deps = next_departures(direction, now, limit=3)
 
@@ -232,7 +219,7 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
-# --- Запуск ---
+# --- Запуск (webhook) ---
 def main() -> None:
     app = Application.builder().token(TOKEN).build()
 
@@ -241,8 +228,6 @@ def main() -> None:
     app.add_handler(CommandHandler("mgarr", next_mgarr))
     app.add_handler(CommandHandler("cirkewwa", next_cirkewwa))
     app.add_handler(CommandHandler("today", today))
-
-    # Геолокація і кнопки вибору острова
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(
         MessageHandler(
@@ -251,8 +236,21 @@ def main() -> None:
         )
     )
 
-    logger.info("Bot started")
-    app.run_polling()
+    # Секретний шлях webhook = сам токен (щоб чужі не слали fake updates)
+    webhook_path = TOKEN
+    full_webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{webhook_path}"
+
+    logger.info("Starting webhook on port %s", PORT)
+    logger.info("Webhook URL: %s", full_webhook_url)
+
+    # run_webhook піднімає HTTP-сервер і відповідає 200 OK на GET / —
+    # цього достатньо для healthcheck від Render і зовнішніх пінгерів.
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=webhook_path,
+        webhook_url=full_webhook_url,
+    )
 
 
 if __name__ == "__main__":
