@@ -1,15 +1,18 @@
 """
-Gozo Ferry Bot — Telegram-бот для розкладу порому Mgarr ↔ Cirkewwa.
-Webhook-режим (для Render / будь-якого Web Service).
+Gozo Ferry Bot — Telegram bot for the Mġarr ↔ Ċirkewwa ferry schedule.
+Webhook mode (for Render / any Web Service).
+Includes sea-comfort assessment via Open-Meteo Marine API.
 """
 
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
 from telegram import (
     KeyboardButton,
     ReplyKeyboardMarkup,
@@ -24,26 +27,29 @@ from telegram.ext import (
     filters,
 )
 
-# --- Конфігурація ---
+# --- Config ---
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError(
-        "Встановіть змінну середовища TELEGRAM_BOT_TOKEN з токеном від @BotFather"
+        "Set the TELEGRAM_BOT_TOKEN environment variable (token from @BotFather)"
     )
 
-# Повний публічний URL сервісу, напр. https://gozo-ferry-bot.onrender.com
-# На Render це значення є в env-змінній RENDER_EXTERNAL_URL автоматично.
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
 if not WEBHOOK_URL:
-    raise RuntimeError(
-        "Встановіть WEBHOOK_URL (повний https://... URL вашого сервісу)"
-    )
+    raise RuntimeError("Set WEBHOOK_URL (full https://... URL of your service)")
 
-# Render сам передає порт через env PORT
 PORT = int(os.environ.get("PORT", "8080"))
 
 MALTA_TZ = ZoneInfo("Europe/Malta")
 SCHEDULE_FILE = Path(__file__).parent / "schedule.json"
+
+# Midpoint of the Malta–Gozo channel (between Ċirkewwa and Mġarr)
+CHANNEL_LAT = 36.015
+CHANNEL_LON = 14.296
+
+# Cache weather for 10 minutes (API is free but let's be polite)
+_weather_cache: dict = {"data": None, "ts": 0.0}
+WEATHER_TTL = 600  # seconds
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -52,25 +58,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# --- Логіка розкладу ---
+# --- Schedule logic ---
 def load_schedule() -> dict:
     with open(SCHEDULE_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def get_day_type(date) -> str:
-    """Повертає 'weekend' для Сб/Нд, інакше 'weekday'."""
+    """Returns 'weekend' for Sat/Sun, 'weekday' otherwise."""
     return "weekend" if date.weekday() >= 5 else "weekday"
 
 
 def parse_time(date, time_str: str) -> datetime:
-    """Об'єднує дату з 'HH:MM' у datetime з таймзоною Мальти."""
+    """Combines date with 'HH:MM' into a Malta-tz datetime."""
     hour, minute = map(int, time_str.split(":"))
     return datetime(date.year, date.month, date.day, hour, minute, tzinfo=MALTA_TZ)
 
 
 def next_departures(direction: str, now: datetime, limit: int = 3) -> list[datetime]:
-    """Наступні `limit` відправлень у заданому напрямку після `now`."""
+    """Next `limit` departures in a given direction after `now`."""
     schedule = load_schedule()
     result: list[datetime] = []
 
@@ -89,49 +95,155 @@ def next_departures(direction: str, now: datetime, limit: int = 3) -> list[datet
 def format_delta(delta: timedelta) -> str:
     total = int(delta.total_seconds() // 60)
     if total < 1:
-        return "зараз"
+        return "now"
     if total < 60:
-        return f"через {total} хв"
+        return f"in {total} min"
     h, m = divmod(total, 60)
-    return f"через {h} год {m} хв" if m else f"через {h} год"
+    return f"in {h}h {m}m" if m else f"in {h}h"
 
 
 def detect_island(lat: float, lon: float) -> str | None:
-    """Визначає острів за координатами. ~36.00°N — кордон."""
+    """Returns 'gozo', 'malta' or None. ~36.00°N is the boundary."""
     if not (35.78 <= lat <= 36.10 and 14.15 <= lon <= 14.58):
         return None
     return "gozo" if lat >= 36.00 else "malta"
 
 
 ISLAND_TO_DIRECTION = {
-    "gozo": ("mgarr_to_cirkewwa", "Mgarr → Cirkewwa", "Гоцо"),
-    "malta": ("cirkewwa_to_mgarr", "Cirkewwa → Mgarr", "Мальті"),
+    "gozo": ("mgarr_to_cirkewwa", "Mġarr → Ċirkewwa", "Gozo"),
+    "malta": ("cirkewwa_to_mgarr", "Ċirkewwa → Mġarr", "Malta"),
 }
 
 
-# --- Хендлери команд ---
+# --- Weather / sea-comfort ---
+async def fetch_sea_conditions() -> dict | None:
+    """
+    Fetches current wind + wave data from Open-Meteo.
+    Returns dict with wind_kts, wind_dir, wave_height_m — or None on failure.
+    Cached for WEATHER_TTL seconds.
+    """
+    now_ts = time.time()
+    if _weather_cache["data"] and now_ts - _weather_cache["ts"] < WEATHER_TTL:
+        return _weather_cache["data"]
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Marine API — wave height
+            marine = await client.get(
+                "https://marine-api.open-meteo.com/v1/marine",
+                params={
+                    "latitude": CHANNEL_LAT,
+                    "longitude": CHANNEL_LON,
+                    "current": "wave_height",
+                },
+            )
+            # Forecast API — wind speed (in knots!) and direction
+            forecast = await client.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": CHANNEL_LAT,
+                    "longitude": CHANNEL_LON,
+                    "current": "wind_speed_10m,wind_direction_10m",
+                    "wind_speed_unit": "kn",
+                },
+            )
+            marine.raise_for_status()
+            forecast.raise_for_status()
+
+            data = {
+                "wave_height_m": marine.json()["current"].get("wave_height"),
+                "wind_kts": forecast.json()["current"]["wind_speed_10m"],
+                "wind_dir": forecast.json()["current"]["wind_direction_10m"],
+            }
+            _weather_cache["data"] = data
+            _weather_cache["ts"] = now_ts
+            return data
+    except Exception as e:
+        logger.warning("Weather fetch failed: %s", e)
+        return None
+
+
+def degrees_to_compass(deg: float) -> str:
+    dirs = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+            "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    ix = int((deg / 22.5) + 0.5) % 16
+    return dirs[ix]
+
+
+def comfort_assessment(wind_kts: float, wave_m: float | None) -> str:
+    """
+    Returns a short human-friendly comfort line.
+    Uses wave height primarily (better predictor), wind as fallback/secondary.
+    """
+    # Wave-based thresholds (empirical for short channel crossings)
+    if wave_m is not None:
+        if wave_m < 0.4:
+            mood = "🟢 Smooth crossing — calm sea"
+        elif wave_m < 0.8:
+            mood = "🟢 Comfortable — light chop"
+        elif wave_m < 1.3:
+            mood = "🟡 Some motion — you'll feel it a bit"
+        elif wave_m < 2.0:
+            mood = "🟠 Rough — sensitive passengers may feel queasy"
+        else:
+            mood = "🔴 Very rough — possible delays or cancellations"
+    else:
+        # Fallback — just wind
+        if wind_kts < 10:
+            mood = "🟢 Calm conditions"
+        elif wind_kts < 17:
+            mood = "🟡 Moderate breeze"
+        elif wind_kts < 25:
+            mood = "🟠 Fresh wind — expect motion"
+        else:
+            mood = "🔴 Strong wind — rough crossing"
+
+    # Extra flag for very strong wind regardless of waves (gusts affect boarding)
+    if wind_kts >= 28:
+        mood += " ⚠️ high wind"
+
+    return mood
+
+
+def format_conditions(data: dict | None) -> str:
+    if not data:
+        return ""  # silently skip if weather fetch failed
+
+    wind_kts = data["wind_kts"]
+    wind_dir = degrees_to_compass(data["wind_dir"])
+    wave_m = data.get("wave_height_m")
+
+    line_weather = f"🌬 {wind_kts:.1f} kts {wind_dir}"
+    if wave_m is not None:
+        line_weather += f"  •  🌊 {wave_m:.1f} m waves"
+
+    return f"\n{line_weather}\n{comfort_assessment(wind_kts, wave_m)}"
+
+
+# --- Command handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "🛳 *Розклад порому Gozo ↔ Malta*\n\n"
-        "Команди:\n"
-        "/next — наступний пором (визначу за локацією)\n"
-        "/mgarr — наступні 3 з Mgarr → Cirkewwa\n"
-        "/cirkewwa — наступні 3 з Cirkewwa → Mgarr\n"
-        "/today — розклад на сьогодні"
+        "🛳 *Gozo ↔ Malta Ferry Schedule*\n\n"
+        "Commands:\n"
+        "/next — next ferry (I'll figure out the direction from your location)\n"
+        "/mgarr — next 3 departures from Mġarr → Ċirkewwa\n"
+        "/cirkewwa — next 3 departures from Ċirkewwa → Mġarr\n"
+        "/today — full schedule for today\n"
+        "/sea — current sea conditions"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def next_both(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
-        [KeyboardButton("📍 Поділитися локацією", request_location=True)],
-        [KeyboardButton("🏝 Я на Гоцо"), KeyboardButton("🇲🇹 Я на Мальті")],
+        [KeyboardButton("📍 Share location", request_location=True)],
+        [KeyboardButton("🏝 I'm on Gozo"), KeyboardButton("🇲🇹 I'm on Malta")],
     ]
     markup = ReplyKeyboardMarkup(
         keyboard, resize_keyboard=True, one_time_keyboard=True
     )
     await update.message.reply_text(
-        "Звідки пливете? Поділіться локацією — визначу автоматично.",
+        "Where are you sailing from? Share your location and I'll figure it out.",
         reply_markup=markup,
     )
 
@@ -143,15 +255,19 @@ async def _send_next_from_island(update: Update, island: str) -> None:
 
     if not deps:
         await update.message.reply_text(
-            f"Ви на {island_name}. Найближчих поромів не знайшов.",
+            f"You're on {island_name}. No upcoming ferries found.",
             reply_markup=ReplyKeyboardRemove(),
         )
         return
 
-    lines = [f"📍 Ви на {island_name} → *{label}*\n"]
+    lines = [f"📍 You're on {island_name} → *{label}*\n"]
     for i, d in enumerate(deps):
         prefix = "➡️" if i == 0 else "  •"
         lines.append(f"{prefix} {d.strftime('%H:%M')} ({format_delta(d - now)})")
+
+    # Append live sea conditions
+    conditions = await fetch_sea_conditions()
+    lines.append(format_conditions(conditions))
 
     await update.message.reply_text(
         "\n".join(lines), parse_mode="Markdown", reply_markup=ReplyKeyboardRemove()
@@ -163,7 +279,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     island = detect_island(loc.latitude, loc.longitude)
     if island is None:
         await update.message.reply_text(
-            "Здається, ви не на Мальті чи Гоцо 🤔\nОберіть острів вручну: /next",
+            "You don't seem to be on Malta or Gozo 🤔\nPick manually: /next",
             reply_markup=ReplyKeyboardRemove(),
         )
         return
@@ -172,9 +288,9 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def handle_island_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text.lower()
-    if "гоцо" in text:
+    if "gozo" in text:
         await _send_next_from_island(update, "gozo")
-    elif "мальт" in text:
+    elif "malta" in text:
         await _send_next_from_island(update, "malta")
 
 
@@ -183,7 +299,7 @@ async def _next_direction(update: Update, direction: str, label: str) -> None:
     deps = next_departures(direction, now, limit=3)
 
     if not deps:
-        await update.message.reply_text(f"Немає найближчих поромів {label}.")
+        await update.message.reply_text(f"No upcoming ferries {label}.")
         return
 
     lines = [f"🛳 *{label}*\n"]
@@ -191,35 +307,63 @@ async def _next_direction(update: Update, direction: str, label: str) -> None:
         prefix = "➡️" if i == 0 else "  •"
         lines.append(f"{prefix} {d.strftime('%H:%M')} ({format_delta(d - now)})")
 
+    conditions = await fetch_sea_conditions()
+    lines.append(format_conditions(conditions))
+
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def next_mgarr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _next_direction(update, "mgarr_to_cirkewwa", "Mgarr → Cirkewwa")
+    await _next_direction(update, "mgarr_to_cirkewwa", "Mġarr → Ċirkewwa")
 
 
 async def next_cirkewwa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _next_direction(update, "cirkewwa_to_mgarr", "Cirkewwa → Mgarr")
+    await _next_direction(update, "cirkewwa_to_mgarr", "Ċirkewwa → Mġarr")
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     now = datetime.now(MALTA_TZ)
     schedule = load_schedule()
     day_type = get_day_type(now.date())
-    day_label = "вихідний" if day_type == "weekend" else "будній"
+    day_label = "weekend" if day_type == "weekend" else "weekday"
 
     m_times = schedule["mgarr_to_cirkewwa"][day_type]
     c_times = schedule["cirkewwa_to_mgarr"][day_type]
 
     text = (
-        f"📅 *Розклад на сьогодні* ({day_label})\n\n"
-        f"🛳 *Mgarr → Cirkewwa:*\n{', '.join(m_times)}\n\n"
-        f"🛳 *Cirkewwa → Mgarr:*\n{', '.join(c_times)}"
+        f"📅 *Today's schedule* ({day_label})\n\n"
+        f"🛳 *Mġarr → Ċirkewwa:*\n{', '.join(m_times)}\n\n"
+        f"🛳 *Ċirkewwa → Mġarr:*\n{', '.join(c_times)}"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
-# --- Запуск (webhook) ---
+async def sea(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = await fetch_sea_conditions()
+    if not data:
+        await update.message.reply_text(
+            "Couldn't fetch sea conditions right now. Try again in a moment."
+        )
+        return
+
+    wind_kts = data["wind_kts"]
+    wind_dir = degrees_to_compass(data["wind_dir"])
+    wave_m = data.get("wave_height_m")
+
+    lines = [
+        "🌊 *Current conditions in the channel*\n",
+        f"🌬 Wind: {wind_kts:.1f} kts from {wind_dir}",
+    ]
+    if wave_m is not None:
+        lines.append(f"🌊 Wave height: {wave_m:.1f} m")
+    lines.append("")
+    lines.append(comfort_assessment(wind_kts, wave_m))
+    lines.append("\n_Source: Open-Meteo Marine_")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# --- Launch (webhook) ---
 def main() -> None:
     app = Application.builder().token(TOKEN).build()
 
@@ -228,23 +372,21 @@ def main() -> None:
     app.add_handler(CommandHandler("mgarr", next_mgarr))
     app.add_handler(CommandHandler("cirkewwa", next_cirkewwa))
     app.add_handler(CommandHandler("today", today))
+    app.add_handler(CommandHandler("sea", sea))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(
         MessageHandler(
-            filters.TEXT & filters.Regex(r"(?i)(гоцо|мальт)"),
+            filters.TEXT & filters.Regex(r"(?i)(gozo|malta)"),
             handle_island_text,
         )
     )
 
-    # Секретний шлях webhook = сам токен (щоб чужі не слали fake updates)
     webhook_path = TOKEN
     full_webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{webhook_path}"
 
     logger.info("Starting webhook on port %s", PORT)
     logger.info("Webhook URL: %s", full_webhook_url)
 
-    # run_webhook піднімає HTTP-сервер і відповідає 200 OK на GET / —
-    # цього достатньо для healthcheck від Render і зовнішніх пінгерів.
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,

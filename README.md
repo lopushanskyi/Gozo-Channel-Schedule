@@ -1,38 +1,30 @@
 # Gozo Ferry Bot 🛳
 
-Telegram-бот для розкладу порома Mgarr ↔ Cirkewwa (Gozo Channel).
+Telegram bot for the Mġarr ↔ Ċirkewwa ferry schedule, with live sea-condition comfort assessment.
 
-## Швидкий старт
+## Features
 
-1. **Створіть бота** через [@BotFather](https://t.me/BotFather) у Telegram — отримайте токен.
-2. **Встановіть залежності:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. **Передайте токен** через змінну середовища:
-   ```bash
-   export TELEGRAM_BOT_TOKEN="123456:AAE..."
-   ```
-4. **Запустіть:**
-   ```bash
-   python bot.py
-   ```
+- Next ferry lookup (auto-detects direction from your location)
+- Full daily schedule
+- Live sea conditions (wind + wave height) from Open-Meteo
+- Comfort rating: 🟢 smooth / 🟡 moderate / 🟠 rough / 🔴 very rough
 
-## Команди бота
+## Commands
 
-| Команда | Що робить |
-|---------|-----------|
-| `/start` | Привітання і список команд |
-| `/next` | Найближчий пором — визначить звідки ви пливете 📍 |
-| `/mgarr` | Наступні 3 пороми Mgarr → Cirkewwa |
-| `/cirkewwa` | Наступні 3 пороми Cirkewwa → Mgarr |
-| `/today` | Повний розклад на сьогодні |
+| Command | What it does |
+|---------|--------------|
+| `/start` | Welcome and command list |
+| `/next` | Next ferry — detects direction from your location 📍 |
+| `/mgarr` | Next 3 departures Mġarr → Ċirkewwa |
+| `/cirkewwa` | Next 3 departures Ċirkewwa → Mġarr |
+| `/today` | Full schedule for today |
+| `/sea` | Current sea conditions in the channel |
 
-Після `/next` бот пропонує поділитися геолокацією або обрати острів вручну. Геолокація визначає острів за широтою: ~36.00°N — кордон між Мальтою і Гоцо/Коміно.
+After `/next` the bot offers to share your location or pick an island manually. Location detection uses latitude: ~36.00°N is the Malta/Gozo boundary.
 
-## Оновлення розкладу
+## Updating the schedule
 
-Редагуйте `schedule.json` — формат простий:
+Edit `schedule.json` when Gozo Channel publishes a new timetable (seasonal changes ~twice a year). Source: [gozochannel.com/ferry/schedule](https://www.gozochannel.com/ferry/schedule/).
 
 ```json
 {
@@ -44,18 +36,34 @@ Telegram-бот для розкладу порома Mgarr ↔ Cirkewwa (Gozo Ch
 }
 ```
 
-⚠️ У файлі зараз **приклад розкладу** — замініть на реальні часи з [gozochannel.com/timetable](https://www.gozochannel.com/timetable/).
+## Deployment (Render Free)
 
-## Структура
+1. Push repo to GitHub
+2. Render → New → Blueprint → select this repo (reads `render.yaml`)
+3. Add environment variable `TELEGRAM_BOT_TOKEN` in the Render dashboard
+4. Optional: set up an UptimeRobot monitor on `https://<your-service>.onrender.com` every 5 min to keep the Free instance awake
 
-- `bot.py` — основна логіка
-- `schedule.json` — розклад (дані, що часто змінюються)
-- `requirements.txt` — залежності Python 3.9+
+## Local development
 
-## Що можна додати далі
+```bash
+pip install -r requirements.txt
+export TELEGRAM_BOT_TOKEN="..."
+export WEBHOOK_URL="https://your-public-ngrok-or-render-url"
+python bot.py
+```
 
-- Автоматичне підтягування розкладу з сайту Gozo Channel (парсинг)
-- Inline-кнопки замість команд
-- Підписка на нагадування («нагадай за 30 хв до наступного»)
-- Урахування свят і сезонних (літо/зима) розкладів
-- Ціни та інформація про доступність транспорту для авто
+For local polling instead of webhooks, swap `run_webhook` for `run_polling` in `main()`.
+
+## Tech stack
+
+- Python 3.12
+- python-telegram-bot 20+ (webhook mode)
+- httpx (already a PTB dependency, used for Open-Meteo)
+- Open-Meteo API (free, no key required)
+
+## What could be added next
+
+- Scrape live "Next Departure" + vehicle queue data from gozochannel.com (requires headless browser — data is JS-rendered)
+- Reminders ("notify me 30 min before my ferry")
+- Remember last chosen island per user
+- Swap to Fast Ferry Valletta–Mġarr schedule as alternative
