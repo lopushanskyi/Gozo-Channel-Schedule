@@ -1,1 +1,703 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gozo Ferry Bot — live Malta ↔ Gozo schedules on Telegram</title>
+<meta name="description" content="Telegram bot with live Malta ↔ Gozo ferry schedules. Both operators. Sea-comfort ratings. Google Maps directions to the terminal. Free.">
 
+<!-- Open Graph -->
+<meta property="og:title" content="Gozo Ferry Bot">
+<meta property="og:description" content="Live Malta ↔ Gozo ferry schedules on Telegram. Both operators, sea comfort, directions.">
+<meta property="og:type" content="website">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..900,0..100&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+
+<style>
+  /* ============================================
+     Replace BOT_USERNAME with your Telegram @handle
+     (without the @). Update via JavaScript below.
+     ============================================ */
+
+  :root {
+    --paper: #f3ead3;
+    --paper-dim: #ebe0c3;
+    --ink: #0d1f3c;
+    --ink-soft: #2a3a5a;
+    --rust: #c04d2c;
+    --rust-deep: #9a3c20;
+    --sea: #4e6f72;
+    --line: rgba(13, 31, 60, 0.18);
+    --line-strong: rgba(13, 31, 60, 0.55);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: 'Newsreader', 'Georgia', serif;
+    font-size: 18px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Subtle paper texture via layered gradients */
+  body {
+    background-image:
+      radial-gradient(ellipse at 20% 10%, rgba(192, 77, 44, 0.04), transparent 55%),
+      radial-gradient(ellipse at 85% 90%, rgba(78, 111, 114, 0.05), transparent 50%);
+    background-attachment: fixed;
+    min-height: 100vh;
+    position: relative;
+  }
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+    opacity: 0.35;
+    mix-blend-mode: multiply;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.051 0 0 0 0 0.121 0 0 0 0 0.235 0 0 0 0.08 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  a { color: inherit; }
+
+  .wrap {
+    position: relative;
+    z-index: 2;
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 32px 28px 80px;
+  }
+
+  /* ============ TOP BAR ============ */
+  .topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .topbar .line-center { color: var(--rust); font-weight: 500; }
+  .topbar .right { text-align: right; }
+
+  /* ============ HERO ============ */
+  .hero {
+    padding: 56px 0 48px;
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 56px;
+    align-items: start;
+    position: relative;
+  }
+
+  .hero-left { animation: rise 900ms ease-out both; animation-delay: 120ms; }
+  .hero-right { animation: rise 900ms ease-out both; animation-delay: 340ms; }
+
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(18px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--rust);
+    margin-bottom: 22px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 28px;
+    height: 1px;
+    background: var(--rust);
+  }
+
+  h1.title {
+    font-family: 'Fraunces', serif;
+    font-weight: 450;
+    font-variation-settings: 'SOFT' 30, 'opsz' 144;
+    font-size: clamp(56px, 9vw, 128px);
+    line-height: 0.9;
+    letter-spacing: -0.025em;
+    color: var(--ink);
+    margin-bottom: 8px;
+  }
+  h1.title em {
+    font-style: italic;
+    font-variation-settings: 'SOFT' 90, 'opsz' 144;
+    color: var(--rust);
+  }
+  h1.title .arrow {
+    font-family: 'Newsreader', serif;
+    font-weight: 400;
+    font-size: 0.72em;
+    color: var(--sea);
+    display: inline-block;
+    margin: 0 0.05em;
+    transform: translateY(-0.08em);
+  }
+
+  .tagline {
+    font-family: 'Newsreader', serif;
+    font-size: clamp(19px, 1.6vw, 23px);
+    font-weight: 400;
+    font-style: italic;
+    line-height: 1.45;
+    color: var(--ink-soft);
+    max-width: 540px;
+    margin-top: 20px;
+    margin-bottom: 36px;
+  }
+
+  .cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+    padding: 18px 28px 18px 32px;
+    background: var(--ink);
+    color: var(--paper);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    font-weight: 500;
+    text-decoration: none;
+    border-radius: 0;
+    transition: background 180ms ease, transform 180ms ease;
+    box-shadow: 4px 4px 0 var(--rust);
+  }
+  .cta:hover {
+    background: var(--rust);
+    transform: translate(-2px, -2px);
+    box-shadow: 6px 6px 0 var(--ink);
+  }
+  .cta .ico {
+    width: 18px; height: 18px;
+    transition: transform 220ms ease;
+  }
+  .cta:hover .ico { transform: translateX(3px); }
+
+  /* ============ QR TICKET ============ */
+  .qr-ticket {
+    background: var(--paper);
+    padding: 28px 24px 22px;
+    border: 1.5px dashed var(--line-strong);
+    position: relative;
+    max-width: 320px;
+    margin-left: auto;
+  }
+  .qr-ticket::before,
+  .qr-ticket::after {
+    content: "";
+    position: absolute;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: #e6dcc0;
+    top: 50%; transform: translateY(-50%);
+  }
+  .qr-ticket::before { left: -10px; }
+  .qr-ticket::after { right: -10px; }
+
+  .qr-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    text-align: center;
+    margin-bottom: 14px;
+  }
+  .qr-label .stamp {
+    color: var(--rust);
+    font-weight: 700;
+  }
+
+  #qr {
+    display: block;
+    margin: 0 auto;
+    background: var(--paper);
+  }
+
+  .qr-caption {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-align: center;
+    margin-top: 14px;
+    color: var(--ink-soft);
+    letter-spacing: 0.08em;
+  }
+  .qr-caption strong {
+    color: var(--ink);
+    font-weight: 500;
+    letter-spacing: 0.12em;
+  }
+
+  /* ============ RULE DIVIDER ============ */
+  .rule {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    margin: 64px 0 44px;
+  }
+  .rule::before,
+  .rule::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--line);
+  }
+  .rule .compass {
+    font-family: 'Fraunces', serif;
+    font-size: 20px;
+    font-style: italic;
+    color: var(--sea);
+    font-variation-settings: 'SOFT' 80;
+  }
+
+  /* ============ ROUTES ============ */
+  .routes {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    gap: 48px;
+    padding: 8px 0 20px;
+  }
+  .section-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    padding-top: 6px;
+  }
+  .section-label .num {
+    color: var(--rust);
+    font-weight: 700;
+    margin-right: 8px;
+  }
+
+  .routes-list {
+    display: grid;
+    gap: 22px;
+  }
+  .route {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 24px;
+    align-items: baseline;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--line);
+  }
+  .route:last-child { border-bottom: none; }
+  .route-name {
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'SOFT' 50, 'opsz' 48;
+    font-size: clamp(24px, 2.4vw, 32px);
+    font-weight: 450;
+    letter-spacing: -0.01em;
+  }
+  .route-name em {
+    font-style: italic;
+    color: var(--rust);
+  }
+  .route-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  .route-duration {
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'SOFT' 100, 'opsz' 48;
+    font-size: 26px;
+    font-weight: 500;
+    color: var(--sea);
+    letter-spacing: -0.01em;
+  }
+
+  /* ============ FEATURES ============ */
+  .features {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    gap: 48px;
+    padding: 8px 0;
+  }
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 36px 40px;
+  }
+  .feature {
+    position: relative;
+    padding-top: 20px;
+    border-top: 2px solid var(--ink);
+  }
+  .feature-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    color: var(--rust);
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .feature-title {
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'SOFT' 40, 'opsz' 48;
+    font-size: 21px;
+    font-weight: 500;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    margin-bottom: 8px;
+  }
+  .feature-body {
+    font-size: 15px;
+    line-height: 1.5;
+    color: var(--ink-soft);
+  }
+
+  /* ============ HOW IT WORKS ============ */
+  .how {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    gap: 48px;
+    padding: 8px 0;
+  }
+  .steps {
+    display: grid;
+    gap: 0;
+    position: relative;
+  }
+  .step {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 28px;
+    padding: 22px 0;
+    border-bottom: 1px solid var(--line);
+    align-items: baseline;
+  }
+  .step:last-child { border-bottom: none; }
+  .step-num {
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'SOFT' 100, 'opsz' 96;
+    font-size: 52px;
+    font-weight: 300;
+    font-style: italic;
+    color: var(--rust);
+    line-height: 1;
+  }
+  .step-content {
+    display: grid;
+    gap: 4px;
+  }
+  .step-cmd {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--ink);
+    background: var(--paper-dim);
+    padding: 2px 8px;
+    display: inline-block;
+    justify-self: start;
+    border-radius: 2px;
+    margin-bottom: 6px;
+  }
+  .step-title {
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'SOFT' 40, 'opsz' 48;
+    font-size: 22px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+  }
+  .step-body {
+    font-size: 15px;
+    color: var(--ink-soft);
+    margin-top: 2px;
+  }
+
+  /* ============ FOOTER ============ */
+  .footer {
+    margin-top: 80px;
+    padding-top: 28px;
+    border-top: 2px solid var(--ink);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+  .footer a {
+    color: var(--ink);
+    text-decoration: underline;
+    text-decoration-color: var(--rust);
+    text-underline-offset: 3px;
+    transition: color 150ms ease;
+  }
+  .footer a:hover { color: var(--rust); }
+  .footer-sources { max-width: 520px; line-height: 1.8; }
+
+  /* ============ DECORATIVE WAVE ============ */
+  .wave-deco {
+    position: absolute;
+    pointer-events: none;
+    opacity: 0.4;
+    color: var(--sea);
+    top: 0; right: -40px;
+    width: 180px;
+    transform: rotate(15deg);
+  }
+
+  /* ============ MOBILE ============ */
+  @media (max-width: 860px) {
+    .wrap { padding: 24px 20px 60px; }
+    .topbar { flex-wrap: wrap; gap: 8px 16px; }
+    .topbar .line-center { order: 3; width: 100%; margin-top: 6px; }
+    .hero {
+      grid-template-columns: 1fr;
+      gap: 36px;
+      padding: 36px 0 32px;
+    }
+    .qr-ticket {
+      margin: 0 auto;
+      max-width: 280px;
+    }
+    .wave-deco { display: none; }
+    .routes, .features, .how {
+      grid-template-columns: 1fr;
+      gap: 20px;
+    }
+    .feature-grid { grid-template-columns: 1fr; gap: 28px; }
+    .route {
+      grid-template-columns: 1fr;
+      gap: 6px;
+    }
+    .route-duration { color: var(--sea); }
+    .step {
+      grid-template-columns: 60px 1fr;
+      gap: 18px;
+    }
+    .step-num { font-size: 40px; }
+    .footer { gap: 16px; }
+  }
+
+  @media (max-width: 480px) {
+    h1.title { font-size: clamp(48px, 13vw, 72px); }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Top bar -->
+  <div class="topbar">
+    <div class="left">Gozo Ferry Bot</div>
+    <div class="line-center">⟶ Live schedules via Telegram</div>
+    <div class="right">Est. 2026 · Malta</div>
+  </div>
+
+  <!-- Hero -->
+  <section class="hero">
+
+    <!-- Decorative wave SVG -->
+    <svg class="wave-deco" viewBox="0 0 200 80" fill="none" stroke="currentColor" stroke-width="1.2">
+      <path d="M0 40 Q 25 20, 50 40 T 100 40 T 150 40 T 200 40"/>
+      <path d="M0 55 Q 25 35, 50 55 T 100 55 T 150 55 T 200 55" opacity="0.6"/>
+      <path d="M0 70 Q 25 50, 50 70 T 100 70 T 150 70 T 200 70" opacity="0.3"/>
+    </svg>
+
+    <div class="hero-left">
+      <div class="eyebrow">A Telegram bot for the channel</div>
+      <h1 class="title">
+        Gozo<br>
+        <em>⇋</em> Malta,<br>
+        by ferry.
+      </h1>
+      <p class="tagline">
+        Live schedules from both operators. Sea-comfort ratings read from real wave data. Directions to the right terminal, one tap away. No ads, no login, no fuss.
+      </p>
+      <a class="cta" id="telegram-cta" href="#">
+        Open in Telegram
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 12h14M13 6l6 6-6 6"/>
+        </svg>
+      </a>
+    </div>
+
+    <div class="hero-right">
+      <div class="qr-ticket">
+        <div class="qr-label"><span class="stamp">✦</span> Boarding pass <span class="stamp">✦</span></div>
+        <canvas id="qr" width="240" height="240"></canvas>
+        <div class="qr-caption">Scan to open<br><strong id="bot-handle">@your_bot</strong></div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- Divider -->
+  <div class="rule"><span class="compass">⚓</span></div>
+
+  <!-- Routes -->
+  <section class="routes">
+    <div class="section-label"><span class="num">01</span>Routes covered</div>
+    <div class="routes-list">
+      <div class="route">
+        <div class="route-name">Ċirkewwa <em>⇋</em> Mġarr</div>
+        <div class="route-meta">Gozo Channel · cars + passengers · 24/7</div>
+        <div class="route-duration">~25 min</div>
+      </div>
+      <div class="route">
+        <div class="route-name">Valletta <em>⇋</em> Mġarr</div>
+        <div class="route-meta">Fast Ferry · passengers only · daytime</div>
+        <div class="route-duration">~45 min</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Divider -->
+  <div class="rule"><span class="compass">⁂</span></div>
+
+  <!-- Features -->
+  <section class="features">
+    <div class="section-label"><span class="num">02</span>What it does</div>
+    <div class="feature-grid">
+      <div class="feature">
+        <div class="feature-num">01</div>
+        <div class="feature-title">Live schedules</div>
+        <div class="feature-body">Straight from each operator's own data — updates the moment they publish. Holiday schedules flagged automatically.</div>
+      </div>
+      <div class="feature">
+        <div class="feature-num">02</div>
+        <div class="feature-title">Sea-comfort ratings</div>
+        <div class="feature-body">Wind and wave height read from live marine data. Colour-coded: smooth → rough → probable cancellation.</div>
+      </div>
+      <div class="feature">
+        <div class="feature-num">03</div>
+        <div class="feature-title">Smart direction</div>
+        <div class="feature-body">Share your location; the bot figures out which way you need to sail — no menu-picking.</div>
+      </div>
+      <div class="feature">
+        <div class="feature-num">04</div>
+        <div class="feature-title">Seat warnings</div>
+        <div class="feature-body">Fast Ferry seats check in real time. Tells you when only a handful are left — before you walk to the terminal.</div>
+      </div>
+      <div class="feature">
+        <div class="feature-num">05</div>
+        <div class="feature-title">Map directions</div>
+        <div class="feature-body">One-tap Google Maps route to the right terminal — driving if you're with a car, transit if on foot.</div>
+      </div>
+      <div class="feature">
+        <div class="feature-num">06</div>
+        <div class="feature-title">Both operators</div>
+        <div class="feature-body">Gozo Channel and Fast Ferry in one place. On-foot travellers see both, and pick whichever is closer.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Divider -->
+  <div class="rule"><span class="compass">✦</span></div>
+
+  <!-- How it works -->
+  <section class="how">
+    <div class="section-label"><span class="num">03</span>How it works</div>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">i.</div>
+        <div class="step-content">
+          <span class="step-cmd">/next</span>
+          <div class="step-title">Ask for the next ferry</div>
+          <div class="step-body">One command, no menus to dig through.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">ii.</div>
+        <div class="step-content">
+          <div class="step-title">Share your location</div>
+          <div class="step-body">Or pick your island manually. The bot works out which direction you need.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">iii.</div>
+        <div class="step-content">
+          <div class="step-title">With a car or on foot?</div>
+          <div class="step-body">Car means Gozo Channel only. On foot shows both operators, side by side.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">iv.</div>
+        <div class="step-content">
+          <div class="step-title">Schedule, weather, directions</div>
+          <div class="step-body">Next three departures, live sea conditions, a button straight to Google Maps.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="footer-sources">
+      <strong style="color: var(--ink); font-weight: 700;">Data sources:</strong><br>
+      Gozo Channel Ltd · Gozo Fast Ferry · Open-Meteo Marine API. Not affiliated with either operator.
+    </div>
+    <div class="footer-right" style="text-align: right;">
+      MMXXVI · Built with python-telegram-bot<br>
+      <a href="https://github.com/lopushanskyi/Gozo-Channel-Schedule" target="_blank" rel="noopener">View source on GitHub</a>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+  // ========================================================
+  // CHANGE THIS to your Telegram bot handle (without the @)
+  // ========================================================
+  const BOT_USERNAME = 'your_bot';  // ← replace e.g. 'GozoFerryBot'
+
+  const botUrl = `https://t.me/${BOT_USERNAME}`;
+
+  // Update the CTA button
+  document.getElementById('telegram-cta').href = botUrl;
+
+  // Update the handle displayed under the QR code
+  document.getElementById('bot-handle').textContent = '@' + BOT_USERNAME;
+
+  // Generate QR code
+  QRCode.toCanvas(document.getElementById('qr'), botUrl, {
+    width: 240,
+    margin: 1,
+    errorCorrectionLevel: 'M',
+    color: {
+      dark: '#0d1f3c',
+      light: '#f3ead3'  // match page background so QR blends into the "ticket"
+    }
+  }, function (error) {
+    if (error) console.error(error);
+  });
+
+  // Update page title if user hasn't changed the placeholder (hint only)
+  if (BOT_USERNAME === 'your_bot') {
+    console.warn('Reminder: update BOT_USERNAME in index.html to your real Telegram bot handle.');
+  }
+</script>
+
+</body>
+</html>
