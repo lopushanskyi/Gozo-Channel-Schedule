@@ -15,8 +15,6 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..900,0..100&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
-
 <style>
   /* ============================================
      Replace BOT_USERNAME with your Telegram @handle
@@ -232,6 +230,8 @@
   #qr {
     display: block;
     margin: 0 auto;
+    width: 240px;
+    height: 240px;
     background: var(--paper);
   }
 
@@ -546,8 +546,8 @@
     <div class="hero-right">
       <div class="qr-ticket">
         <div class="qr-label"><span class="stamp">✦</span> Boarding pass <span class="stamp">✦</span></div>
-        <canvas id="qr" width="240" height="240"></canvas>
-        <div class="qr-caption">Scan to open<br><strong id="bot-handle">@gozochannelbot</strong></div>
+        <img id="qr" src="" alt="QR code to open bot in Telegram">
+        <div class="qr-caption">Scan to open<br><strong id="bot-handle">@your_bot</strong></div>
       </div>
     </div>
 
@@ -659,7 +659,7 @@
       Gozo Channel Ltd · Gozo Fast Ferry · Open-Meteo Marine API. Not affiliated with either operator.
     </div>
     <div class="footer-right" style="text-align: right;">
-      MMXXVI · <a href="mailto:tlopu@icloud.com">Taras Lopushanskyi</a> · Built with python-telegram-bot<br>
+      MMXXVI · Built with python-telegram-bot<br>
       <a href="https://github.com/lopushanskyi/Gozo-Channel-Schedule" target="_blank" rel="noopener">View source on GitHub</a>
     </div>
   </footer>
@@ -670,7 +670,7 @@
   // ========================================================
   // CHANGE THIS to your Telegram bot handle (without the @)
   // ========================================================
-  const BOT_USERNAME = 'gozochannelbot';  // ← replace e.g. 'GozoFerryBot'
+  const BOT_USERNAME = 'your_bot';  // ← replace e.g. 'GozoChannelBot'
 
   const botUrl = `https://t.me/${BOT_USERNAME}`;
 
@@ -680,21 +680,20 @@
   // Update the handle displayed under the QR code
   document.getElementById('bot-handle').textContent = '@' + BOT_USERNAME;
 
-  // Generate QR code
-  QRCode.toCanvas(document.getElementById('qr'), botUrl, {
-    width: 240,
-    margin: 1,
-    errorCorrectionLevel: 'M',
-    color: {
-      dark: '#0d1f3c',
-      light: '#f3ead3'  // match page background so QR blends into the "ticket"
-    }
-  }, function (error) {
-    if (error) console.error(error);
-  });
+  // Generate QR code via qrserver.com (free, no auth, returns a PNG).
+  // Colors are hex without '#', matching our page palette.
+  const qrSrc =
+    'https://api.qrserver.com/v1/create-qr-code/' +
+    '?data=' + encodeURIComponent(botUrl) +
+    '&size=480x480' +       // 2× for retina crispness, rendered at 240px
+    '&color=0d1f3c' +       // --ink
+    '&bgcolor=f3ead3' +     // --paper
+    '&margin=0' +
+    '&qzone=0' +
+    '&format=png';
+  document.getElementById('qr').src = qrSrc;
 
-  // Update page title if user hasn't changed the placeholder (hint only)
-  if (BOT_USERNAME === 'gozochannelbot') {
+  if (BOT_USERNAME === 'your_bot') {
     console.warn('Reminder: update BOT_USERNAME in index.html to your real Telegram bot handle.');
   }
 </script>
