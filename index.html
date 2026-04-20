@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gozo Ferry Bot — Пароми Мальти та Гозо</title>
+    <style>
+        :root {
+            --primary-blue: #0055b8;
+            --secondary-blue: #00a0e3;
+            --light-bg: #f4f7f9;
+            --text-dark: #333;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: var(--light-bg);
+            color: var(--text-dark);
+            text-align: center;
+        }
+
+        header {
+            padding: 60px 20px;
+            background: linear-gradient(135deg, var(--primary-blue), var(--secondary-blue));
+            color: white;
+            clip-path: polygon(0 0, 100% 0, 100% 85%, 0% 100%);
+        }
+
+        .logo {
+            width: 180px;
+            height: 180px;
+            border-radius: 50%;
+            background: white;
+            padding: 5px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 20px;
+        }
+
+        h1 { margin: 10px 0; font-size: 2.5rem; }
+        p.subtitle { font-size: 1.2rem; opacity: 0.9; margin-bottom: 30px; }
+
+        .btn-tg {
+            display: inline-block;
+            background: #24A1DE;
+            color: white;
+            padding: 15px 40px;
+            border-radius: 50px;
+            text-decoration: none;
+            font-weight: bold;
+            font-size: 1.2rem;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .btn-tg:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            padding: 60px 20px;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.05);
+        }
+
+        .card h3 { color: var(--primary-blue); margin-top: 0; }
+
+        .operators-table {
+            margin: 40px auto;
+            max-width: 800px;
+            background: white;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.05);
+        }
+
+        table { width: 100%; border-collapse: collapse; }
+        th { background: #eee; padding: 15px; }
+        td { padding: 15px; border-top: 1px solid #eee; }
+
+        footer { padding: 40px; font-size: 0.9rem; color: #777; }
+    </style>
+</head>
+<body>
+
+<header>
+    <img src="https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/ChatGPT%20Image%20Apr%2020%2C%202026%2C%2010_21_35%20PM.jpg" alt="Gozo Ferry Bot Logo" class="logo">
+    <h1>Gozo Ferry Bot 🛳</h1>
+    <p class="subtitle">Ваш персональний гід переправами між Мальтою та Гозо</p>
+    <a href="https://t.me/YOUR_BOT_USERNAME" class="btn-tg">Запустити у Telegram</a>
+</header>
+
+<section class="features">
+    <div class="card">
+        <h3>🕒 Актуальний розклад</h3>
+        <p>Дані в реальному часі від <b>Gozo Channel</b> та <b>Gozo Fast Ferry</b>.</p>
+    </div>
+    <div class="card">
+        <h3>🌊 Стан моря</h3>
+        <p>Оцінка комфорту: від "Спокійно" до "Дуже штормить" на основі даних Open-Meteo.</p>
+    </div>
+    <div class="card">
+        <h3>📍 Розумна навігація</h3>
+        <p>Бот підкаже дорогу до терміналу через Google Maps залежно від вашої локації.</p>
+    </div>
+</section>
+
+<div class="operators-table">
+    <table>
+        <thead>
+            <tr>
+                <th>Оператор</th>
+                <th>Маршрут</th>
+                <th>Час у дорозі</th>
+                <th>Автомобілі</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><b>Gozo Channel</b></td>
+                <td>Ċirkewwa ↔ Mġarr</td>
+                <td>~25 хв</td>
+                <td>✅ Так</td>
+            </tr>
+            <tr>
+                <td><b>Gozo Fast Ferry</b></td>
+                <td>Valletta ↔ Mġarr</td>
+                <td>~45 хв</td>
+                <td>❌ Тільки пасажири</td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+<footer>
+    <p>Створено для зручних подорожей островами. Дані базуються на офіційних джерелах операторів.</p>
+</footer>
+
+</body>
+</html>
