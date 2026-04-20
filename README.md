@@ -16,6 +16,7 @@ Telegram bot covering **both** Malta–Gozo ferry operators, with live sea-condi
 
 - Next-ferry lookup with auto-direction from your location
 - Picks the right operator based on travel mode (with car / on foot)
+- **Google Maps directions** to the relevant ferry terminal(s) — shown as inline buttons when the user shares real location
 - Live daily schedules from each operator's own data source
 - Fast Ferry **seat warnings** when availability drops below 30
 - Holiday-schedule detection 🎉 (Gozo Channel)
@@ -48,6 +49,7 @@ Telegram bot covering **both** Malta–Gozo ferry operators, with live sea-condi
 
 - **With a car** → only Gozo Channel (Fast Ferry doesn't take vehicles)
 - **On foot** → both operators, so the user can pick based on where they actually are (Ċirkewwa is on Malta's north coast, Valletta is central)
+- If the user **shared real location** (not just manually picked an island), a follow-up message appears with Google Maps buttons to the relevant terminal(s). Directions use `driving` mode for car, `transit` mode for foot (realistic for Malta's bus network). When on Malta on foot, two buttons appear — one per operator's terminal — since the user can pick whichever is closer.
 
 ## Data sources
 

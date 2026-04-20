@@ -17,6 +17,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
@@ -273,6 +275,59 @@ def holiday_banner(meta: dict) -> str:
     return "🎉 _Public holiday schedule_\n\n" if meta.get("is_holiday") else ""
 
 
+# --- Ferry terminal coordinates & Google Maps links ---
+TERMINALS = {
+    # (lat, lon, display_name)
+    "cirkewwa": (35.987681, 14.329097, "Ċirkewwa Ferry Terminal"),
+    "mgarr":    (36.024068, 14.298150, "Mġarr Ferry Terminal"),
+    "valletta": (35.894754, 14.513739, "Valletta Ferry Terminal"),
+}
+
+
+def maps_url(
+    from_lat: float, from_lon: float,
+    to_lat: float, to_lon: float,
+    mode: str,
+) -> str:
+    """Build a Google Maps directions URL. mode: 'car' → driving, 'foot' → transit."""
+    travelmode = "driving" if mode == "car" else "transit"
+    return (
+        f"https://www.google.com/maps/dir/?api=1"
+        f"&origin={from_lat},{from_lon}"
+        f"&destination={to_lat},{to_lon}"
+        f"&travelmode={travelmode}"
+    )
+
+
+def build_directions_markup(
+    user_lat: float, user_lon: float, island: str, mode: str,
+) -> InlineKeyboardMarkup | None:
+    """
+    Build inline keyboard with Google Maps directions to the relevant terminal(s).
+    - Gozo + any mode → one button to Mġarr
+    - Malta + car → one button to Ċirkewwa
+    - Malta + foot → two buttons (Ċirkewwa and Valletta, since both are usable)
+    """
+    buttons: list[list[InlineKeyboardButton]] = []
+
+    def btn(terminal_key: str, label_override: str | None = None):
+        t_lat, t_lon, t_name = TERMINALS[terminal_key]
+        label = label_override or f"🗺 Directions to {t_name}"
+        return [InlineKeyboardButton(
+            label, url=maps_url(user_lat, user_lon, t_lat, t_lon, mode),
+        )]
+
+    if island == "gozo":
+        buttons.append(btn("mgarr"))
+    elif mode == "car":
+        buttons.append(btn("cirkewwa"))
+    else:  # malta, foot
+        buttons.append(btn("cirkewwa", "🗺 To Ċirkewwa (Gozo Channel)"))
+        buttons.append(btn("valletta", "🗺 To Valletta (Fast Ferry)"))
+
+    return InlineKeyboardMarkup(buttons) if buttons else None
+
+
 # --- Weather ---
 async def fetch_sea_conditions() -> dict | None:
     now_ts = time.time()
@@ -377,6 +432,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def next_both(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("pending_island", None)
+    context.user_data.pop("pending_location", None)
     keyboard = [
         [KeyboardButton("📍 Share location", request_location=True)],
         [KeyboardButton("🏝 I'm on Gozo"), KeyboardButton("🇲🇹 I'm on Malta")],
@@ -413,6 +469,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
     context.user_data["pending_island"] = island
+    context.user_data["pending_location"] = (loc.latitude, loc.longitude)
     await _ask_mode(update)
 
 
@@ -423,20 +480,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Step 2: mode selection (island already known)
     if pending and ("car" in text or "foot" in text):
         mode = "car" if "car" in text else "foot"
+        location = context.user_data.get("pending_location")  # may be None
         context.user_data.pop("pending_island", None)
-        await _send_results(update, pending, mode)
+        context.user_data.pop("pending_location", None)
+        await _send_results(update, pending, mode, location)
         return
 
-    # Step 1: island selection
+    # Step 1: island selection (manual, no location)
     if "gozo" in text:
         context.user_data["pending_island"] = "gozo"
+        context.user_data.pop("pending_location", None)
         await _ask_mode(update)
     elif "malta" in text:
         context.user_data["pending_island"] = "malta"
+        context.user_data.pop("pending_location", None)
         await _ask_mode(update)
 
 
-async def _send_results(update: Update, island: str, mode: str) -> None:
+async def _send_results(
+    update: Update,
+    island: str,
+    mode: str,
+    location: tuple[float, float] | None,
+) -> None:
     now = datetime.now(MALTA_TZ)
 
     if island == "gozo":
@@ -486,9 +552,23 @@ async def _send_results(update: Update, island: str, mode: str) -> None:
     conditions = await fetch_sea_conditions()
     lines.append(format_conditions(conditions))
 
+    # First message: schedule + sea conditions, also dismisses the reply keyboard
     await update.message.reply_text(
-        "\n".join(lines), parse_mode="Markdown", reply_markup=ReplyKeyboardRemove()
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove(),
     )
+
+    # Second message: Google Maps directions buttons — only if real location shared
+    if location is not None:
+        lat, lon = location
+        directions_markup = build_directions_markup(lat, lon, island, mode)
+        if directions_markup:
+            await update.message.reply_text(
+                "🗺 _Get directions to the terminal:_",
+                parse_mode="Markdown",
+                reply_markup=directions_markup,
+            )
 
 
 # --- Gozo Channel direction-specific commands ---
