@@ -83,6 +83,20 @@ Returns trips with `departingTime`, `vesselName`, `seatsEconomy`. Cached 5 min (
 3. Set env variable `TELEGRAM_BOT_TOKEN` in Render dashboard
 4. Optional: UptimeRobot on `https://<service>.onrender.com` every 5 min to prevent spin-down
 
+## Landing page (GitHub Pages)
+
+A static landing page lives in `docs/index.html`. It's a single self-contained file (fonts from Google, QR generator from jsDelivr CDN) — no build step needed.
+
+**Before publishing:** open `docs/index.html` and change `BOT_USERNAME` near the bottom of the `<script>` block to your real Telegram bot handle (without the `@`).
+
+**Enable GitHub Pages:**
+1. Repo → Settings → Pages
+2. Source: **Deploy from a branch**
+3. Branch: `main`, folder: `/docs`
+4. Save → page is live at `https://<your-username>.github.io/<repo-name>/` within ~1 min
+
+Share that URL — people can scan the QR with their phone to add the bot in one tap.
+
 ## Local development
 
 ```bash
