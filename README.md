@@ -112,6 +112,15 @@ python bot.py
 - python-telegram-bot 20+ `[webhooks]`
 - httpx (async HTTP)
 
+## Analytics
+
+Lightweight, privacy-respecting in-memory analytics (`analytics.py`):
+
+- **What's tracked**: per-command counts, hour-of-day distribution, per-date counts (30 days), mode choice (car/foot), island picks, location-sharing rate, API error counts
+- **What's NOT tracked**: user IDs, names, real coordinates, message text, anything personally identifying
+- **Where it lives**: in-process memory (resets on restart). Every event also emits a structured JSON log line — visible in Render Logs for ~7 days
+- **Admin access**: `/stats` command, available only to the Telegram user whose ID matches the `ADMIN_USER_ID` env var. To find your own ID, message [@userinfobot](https://t.me/userinfobot) and copy the number it returns. Put it in Render → Environment → `ADMIN_USER_ID`.
+
 ## Architecture notes
 
 - **State management**: `context.user_data['pending_island']` carries the island between location and mode messages; cleared after results sent. Ephemeral — resets on process restart (fine).

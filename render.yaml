@@ -7,6 +7,8 @@ services:
     startCommand: python bot.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        sync: false  # встановити вручну в Render Dashboard
+        sync: false  # set in Render dashboard
+      - key: ADMIN_USER_ID
+        sync: false  # set in Render dashboard (your Telegram user ID)
       - key: PYTHON_VERSION
         value: 3.12.3
