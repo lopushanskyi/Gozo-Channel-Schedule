@@ -473,7 +473,10 @@ async def next_both(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         keyboard, resize_keyboard=True, one_time_keyboard=True
     )
     await update.message.reply_text(
-        "Where are you sailing from?",
+        "Where are you sailing from?\n\n"
+        "_Tip: location sharing works only in the mobile app — "
+        "on desktop, pick your island manually._",
+        parse_mode="Markdown",
         reply_markup=markup,
     )
 
