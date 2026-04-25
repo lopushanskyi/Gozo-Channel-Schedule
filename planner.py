@@ -101,7 +101,7 @@ The user wants to get between Malta and Gozo (two islands in Malta).
 You must respond with ONLY a single JSON object, no preamble, no markdown, no code fences.
 
 Required fields:
-- "origin": specific place name as the user wrote it (e.g. "Sliema", "Valletta", "Victoria", "Mġarr", "Xagħra"). NEVER include qualifiers like ", Gozo" or ", Malta". NEVER fabricate.
+- "origin": specific place name as the user wrote it (e.g. "Sliema", "Valletta", "Victoria", "Mġarr", "Xagħra"). NEVER include qualifiers like ", Gozo" or ", Malta". NEVER fabricate. ALWAYS restore Maltese diacritics if you recognise the place: "Xaghra"→"Xagħra", "Mgarr"→"Mġarr", "Zebbug"→"Żebbuġ", "Ghajnsielem"→"Għajnsielem", "Gzira"→"Gżira", "Qrendi"→"Qrendi", etc.
 - "destination": same rules as origin.
 - "deadline_hhmm": arrival deadline in "HH:MM" 24h format if user gave a time, else null.
 - "deadline_date": ISO date "YYYY-MM-DD" the deadline applies to. Resolve relative words ("today", "tomorrow", "next Monday") using the current date provided in CONTEXT. If no date is specified but a time is, default to "today" if that time hasn't passed yet, else "tomorrow". If no deadline at all, null.
@@ -203,6 +203,27 @@ async def geocode(place: str) -> GeocodedPlace | None:
     Tries the full string first, then progressively simpler variants
     (strips trailing qualifiers like ', Gozo' / ', Malta')."""
 
+    # Common Maltese letters often typed without diacritics by tourists.
+    # We try the user's spelling first, then add a diacritic-restored variant.
+    _MALTESE_FIXUPS = [
+        ("xaghra", "Xagħra"),
+        ("mgarr", "Mġarr"),
+        ("zebbug", "Żebbuġ"),
+        ("zejtun", "Żejtun"),
+        ("zurrieq", "Żurrieq"),
+        ("zabbar", "Żabbar"),
+        ("birzebbuga", "Birżebbuġa"),
+        ("zebbiegh", "Żebbiegħ"),
+        ("ghajnsielem", "Għajnsielem"),
+        ("ghasri", "Għasri"),
+        ("gharb", "Għarb"),
+        ("xewkija", "Xewkija"),
+        ("rabat", "Rabat"),
+        ("sannat", "Sannat"),
+        ("qala", "Qala"),
+        ("kercem", "Kerċem"),
+    ]
+
     def _variants(p: str) -> list[str]:
         out = [p.strip()]
         # Strip trailing ", X" qualifiers since they often confuse geocoder
@@ -213,6 +234,12 @@ async def geocode(place: str) -> GeocodedPlace | None:
         for prefix in ("the ", "The "):
             if first.startswith(prefix):
                 out.append(first[len(prefix):])
+        # Maltese diacritic restoration — tourists often type ASCII forms
+        lower_base = out[-1].lower()
+        for ascii_form, real_form in _MALTESE_FIXUPS:
+            if ascii_form in lower_base:
+                out.append(real_form)
+                break
         # Always also try with ", Malta" appended — disambiguates small
         # Maltese places that collide with British/other names
         # (e.g. "St Julians" → otherwise matches a UK village)
