@@ -85,9 +85,20 @@ async def fetch_live_schedule(date_obj: date_cls) -> dict | None:
         f"https://static.gozochannel.com/schedules/"
         f"{date_obj.year}/{date_obj.month:02d}/{date_obj.day:02d}/passenger.json"
     )
+    # Some CDNs (Cloudflare-fronted ones in particular) block default
+    # python-httpx User-Agent strings. Pretend to be a normal browser.
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.gozochannel.com/",
+    }
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(url)
+            r = await client.get(url, headers=headers)
             r.raise_for_status()
             data = r.json()
             _live_schedule_cache[cache_key] = data
@@ -905,31 +916,54 @@ async def _run_plan(update: Update, request_text: str) -> None:
             )
             return
 
-        # Step 4: fetch ferry departures for relevant options
+        # Step 4: fetch ferry departures for relevant options.
+        # If the deadline is in the future (tomorrow+), fetch from the START
+        # of that day so morning options are visible — otherwise we'd only
+        # see departures after right-now.
         now = datetime.now(MALTA_TZ)
+        ref_time = now
+        if parsed.deadline_date:
+            try:
+                deadline_d = datetime.strptime(
+                    parsed.deadline_date, "%Y-%m-%d"
+                ).date()
+                if deadline_d > now.date():
+                    ref_time = datetime.combine(
+                        deadline_d, datetime.min.time(), tzinfo=MALTA_TZ
+                    )
+            except ValueError:
+                pass  # bad date format from LLM, fall back to now
+
         options = planner.applicable_options(origin_geo.on_gozo, dest_geo.on_gozo)
+
+        def _fmt_dep(dt: datetime) -> str:
+            # Mark dates clearly when they differ from today so the LLM
+            # doesn't confuse "06:45" tomorrow with "06:45" today.
+            if dt.date() != now.date():
+                return dt.strftime("%a %H:%M")  # e.g. "Sun 06:45"
+            return dt.strftime("%H:%M")
 
         ferry_data: dict = {}
         for opt in options:
             if opt.operator == "Gozo Channel":
                 deps, _meta = await next_gc_departures(
-                    opt.direction_key, now, limit=5
+                    opt.direction_key, ref_time, limit=8
                 )
                 ferry_data[f"{opt.operator} ({opt.from_terminal} → {opt.to_terminal})"] = [
                     {
-                        "departing": d.strftime("%H:%M"),
+                        "departing": _fmt_dep(d),
                         "crossing_minutes": opt.crossing_minutes,
                     }
                     for d in deps
                 ]
             else:  # Fast Ferry
                 if origin_geo.on_gozo:
-                    ff_deps = await next_fast_ferry(FF_MGARR, FF_VALLETTA, now, limit=5)
+                    ff_deps = await next_fast_ferry(FF_MGARR, FF_VALLETTA, ref_time, limit=8)
                 else:
-                    ff_deps = await next_fast_ferry(FF_VALLETTA, FF_MGARR, now, limit=5)
+                    ff_deps = await next_fast_ferry(FF_VALLETTA, FF_MGARR, ref_time, limit=8)
                 ferry_data[f"{opt.operator} ({opt.from_terminal} → {opt.to_terminal})"] = [
                     {
-                        "departing": t["departing"].strftime("%H:%M"),
+                        "departing": _fmt_dep(t["departing"]),
                         "vessel": t["vessel"] or None,
                         "seats_economy": t["seats"] if t["seats"] >= 0 else None,
                         "crossing_minutes": opt.crossing_minutes,

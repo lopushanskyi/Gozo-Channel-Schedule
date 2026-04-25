@@ -91,7 +91,8 @@ async def _call_claude(
 class ParsedRequest:
     origin: str
     destination: str
-    deadline_hhmm: Optional[str]  # "HH:MM" 24h, or None if not specified
+    deadline_hhmm: Optional[str]   # "HH:MM" 24h, or None if not specified
+    deadline_date: Optional[str]   # "YYYY-MM-DD" or None (defaults to today)
     error: Optional[str] = None    # user-facing message if parsing failed
 
 
@@ -103,6 +104,7 @@ Required fields:
 - "origin": specific place name as the user wrote it (e.g. "Sliema", "Valletta", "Victoria", "Mġarr", "Xagħra"). NEVER include qualifiers like ", Gozo" or ", Malta". NEVER fabricate.
 - "destination": same rules as origin.
 - "deadline_hhmm": arrival deadline in "HH:MM" 24h format if user gave a time, else null.
+- "deadline_date": ISO date "YYYY-MM-DD" the deadline applies to. Resolve relative words ("today", "tomorrow", "next Monday") using the current date provided in CONTEXT. If no date is specified but a time is, default to "today" if that time hasn't passed yet, else "tomorrow". If no deadline at all, null.
 - "error": null normally, OR a short human-friendly clarification question if the request is ambiguous or missing info.
 
 CONTEXT HANDLING:
@@ -113,31 +115,42 @@ DISAMBIGUATION:
 - "Victoria" = the city in central Gozo (also called Rabat locally). Just return "Victoria".
 - "Rabat" is ambiguous — there's one on Malta and one on Gozo. ASK which.
 
-Examples:
+Examples (assume CONTEXT date is 2026-04-25, time 14:30):
 
 Input: "from Sliema to Victoria by 14:00"
-Output: {"origin": "Sliema", "destination": "Victoria", "deadline_hhmm": "14:00", "error": null}
+Output: {"origin": "Sliema", "destination": "Victoria", "deadline_hhmm": "14:00", "deadline_date": "2026-04-26", "error": null}
+(reason: 14:00 already passed today, so default to tomorrow)
+
+Input: "from Sliema to Victoria by 18:00"
+Output: {"origin": "Sliema", "destination": "Victoria", "deadline_hhmm": "18:00", "deadline_date": "2026-04-25", "error": null}
 
 Input: "I'm in Xaghra need airport by 17:00 tomorrow"
-Output: {"origin": "Xagħra", "destination": "Malta International Airport", "deadline_hhmm": "17:00", "error": null}
+Output: {"origin": "Xagħra", "destination": "Malta International Airport", "deadline_hhmm": "17:00", "deadline_date": "2026-04-26", "error": null}
 
 Input: "how do I get to Gozo"
-Output: {"origin": null, "destination": "Gozo", "deadline_hhmm": null, "error": "Where are you starting from?"}
+Output: {"origin": null, "destination": "Gozo", "deadline_hhmm": null, "deadline_date": null, "error": "Where are you starting from?"}
 
 Input: "from Sliema to Rabat"
-Output: {"origin": "Sliema", "destination": null, "deadline_hhmm": null, "error": "There are two Rabats — the one on Malta or the one on Gozo?"}
-
-Input: "хочу до Вікторії"
-Output: {"origin": null, "destination": "Victoria", "deadline_hhmm": null, "error": "Where are you starting from?"}
+Output: {"origin": "Sliema", "destination": null, "deadline_hhmm": null, "deadline_date": null, "error": "There are two Rabats — the one on Malta or the one on Gozo?"}
 """
 
 
 async def parse_request(
     text: str, history: list[dict] | None = None,
 ) -> ParsedRequest:
-    raw = await _call_claude(PARSE_SYSTEM, text, max_tokens=300, history=history)
+    # Inject the current Malta date/time so the LLM can resolve "today",
+    # "tomorrow", "by 14:00", etc. against a known reference.
+    now = datetime.now(MALTA_TZ)
+    contextualised = (
+        f"CONTEXT: Current Malta date is {now.strftime('%Y-%m-%d')} "
+        f"({now.strftime('%A')}), current time is {now.strftime('%H:%M')}.\n\n"
+        f"User message: {text}"
+    )
+    raw = await _call_claude(
+        PARSE_SYSTEM, contextualised, max_tokens=300, history=history
+    )
     if raw is None:
-        return ParsedRequest("", "", None, "AI is unavailable right now. Try again in a moment.")
+        return ParsedRequest("", "", None, None, "AI is unavailable right now. Try again in a moment.")
 
     # Log raw response so we can debug LLM weirdness in Render logs
     logger.info("LLM parse input=%r raw=%r", text, raw[:300])
@@ -154,21 +167,25 @@ async def parse_request(
         data = json.loads(cleaned)
     except json.JSONDecodeError:
         logger.warning("LLM returned non-JSON: %r", raw[:200])
-        return ParsedRequest("", "", None, "Sorry, I couldn't understand that. Try: 'from Sliema to Victoria by 14:00'.")
+        return ParsedRequest("", "", None, None, "Sorry, I couldn't understand that. Try: 'from Sliema to Victoria by 14:00'.")
 
     if data.get("error"):
         return ParsedRequest(
-            data.get("origin") or "", data.get("destination") or "",
-            data.get("deadline_hhmm"), data["error"],
+            data.get("origin") or "",
+            data.get("destination") or "",
+            data.get("deadline_hhmm"),
+            data.get("deadline_date"),
+            data["error"],
         )
     if not data.get("origin") or not data.get("destination"):
         logger.warning("LLM missing origin/destination: %r", data)
-        return ParsedRequest("", "", None, "I need both origin and destination. Try: 'from Sliema to Victoria by 14:00'.")
+        return ParsedRequest("", "", None, None, "I need both origin and destination. Try: 'from Sliema to Victoria by 14:00'.")
 
     return ParsedRequest(
         origin=data["origin"],
         destination=data["destination"],
         deadline_hhmm=data.get("deadline_hhmm"),
+        deadline_date=data.get("deadline_date"),
     )
 
 
@@ -302,7 +319,8 @@ def build_planning_context(
             "matched_to": dest_geo.name,
             "on_gozo": dest_geo.on_gozo,
         },
-        "deadline": parsed.deadline_hhmm,
+        "deadline_time": parsed.deadline_hhmm,
+        "deadline_date": parsed.deadline_date,
         "ferry_options": ferry_data,
         "sea_conditions": sea_conditions,
     }
@@ -313,9 +331,9 @@ PLAN_SYSTEM = """You are a friendly travel assistant helping someone plan a trip
 
 You will receive a JSON object with:
 - The user's origin and destination (with island detection)
-- Available ferry departures from each operator
+- Available ferry departures from each operator (today + tomorrow morning)
+- `deadline_date` (YYYY-MM-DD) and `deadline_time` (HH:MM) — TRUST THESE. The parser already resolved "tomorrow"/"today". If `deadline_date` is in the future, do NOT say "you missed it" just because the time has passed today.
 - Current sea conditions
-- Optional deadline
 
 Your job: write a SHORT, practical Telegram message (Markdown formatting) that helps them choose.
 
@@ -328,6 +346,11 @@ RULES:
   If the user is far from a terminal, just say "you'll need to get to <terminal> first".
 - Keep it under 12 lines total. Telegram users skim.
 - End with: "_Plus the time to/from the terminal — not included in this estimate._"
+
+DEADLINE LOGIC:
+- If `deadline_date` is tomorrow or later, you have plenty of options — pick the most convenient morning departure.
+- If `deadline_date` is today and there's no ferry that fits, say so honestly.
+- If no deadline given, just show the next 1-2 sensible options.
 
 PICKING BETWEEN OPERATORS:
 - Gozo Channel: car ferry, runs 24/7, Ċirkewwa ↔ Mġarr (~25 min). On Malta side it's at the very north, ~1h by bus from Valletta.
