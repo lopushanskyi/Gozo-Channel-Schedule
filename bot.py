@@ -567,9 +567,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = update.message.text
     text_lower = text.lower()
     pending = context.user_data.get("pending_island")
+    chat_id = update.effective_chat.id
 
-    # Conversational follow-up for /plan
+    # Conversational follow-up for /plan (initial entry)
     if context.user_data.pop("awaiting_plan", False):
+        await _run_plan(update, text)
+        return
+
+    # Clarification follow-up: bot previously asked a question for /plan
+    # and the user is responding. Detect by presence of stored history.
+    if chat_id in _plan_history:
         await _run_plan(update, text)
         return
 
@@ -844,15 +851,31 @@ async def plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _run_plan(update: Update, request_text: str) -> None:
     """Heavy lifting for the planner — geocode, fetch, LLM, format."""
-    # Acknowledge so the user knows something is happening (LLM call ~2s)
     progress_msg = await update.message.reply_text("🤔 Planning…")
 
     try:
-        # Step 1: parse with LLM
-        parsed = await planner.parse_request(request_text)
+        chat_id = update.effective_chat.id
+        history_for_llm = _plan_history.get(chat_id, [])
+
+        # Step 1: parse with LLM (passing history for clarifications)
+        parsed = await planner.parse_request(request_text, history=history_for_llm)
+
+        # Save this turn so a follow-up like "yes" can be linked
+        new_history = history_for_llm + [
+            {"role": "user", "content": request_text},
+        ]
+
         if parsed.error:
+            # Save the bot's clarifying question into history.
+            # User's next message will land in handle_text, which checks
+            # _plan_history and routes back here if a clarification is pending.
+            new_history.append({"role": "assistant", "content": parsed.error})
+            _plan_history[chat_id] = new_history[-6:]  # cap to last 3 exchanges
             await progress_msg.edit_text(parsed.error)
             return
+
+        # We got a complete request — clear history
+        _plan_history.pop(chat_id, None)
 
         # Step 2: geocode both ends
         origin_geo = await planner.geocode(parsed.origin)
@@ -941,6 +964,11 @@ async def _run_plan(update: Update, request_text: str) -> None:
             )
         except Exception:
             pass
+
+
+# Per-chat in-memory history for /plan multi-turn clarifications.
+# Resets on bot restart (acceptable for a clarification flow).
+_plan_history: dict[int, list[dict]] = {}
 
 
 # --- Admin: stats ---

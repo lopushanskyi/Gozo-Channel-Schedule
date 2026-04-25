@@ -42,13 +42,20 @@ def is_on_gozo(lat: float, lon: float) -> bool | None:
 
 # --- LLM call wrapper ---
 async def _call_claude(
-    system: str, user: str, max_tokens: int = 1024
+    system: str,
+    user: str,
+    max_tokens: int = 1024,
+    history: list[dict] | None = None,
 ) -> str | None:
-    """Single Claude API call. Returns text or None on failure."""
+    """Single Claude API call. Returns text or None on failure.
+    history: optional list of prior {"role": "user"|"assistant", "content": str}
+    messages — prepended before the new user message."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         logger.warning("ANTHROPIC_API_KEY not set — LLM disabled")
         return None
+
+    messages = (history or []) + [{"role": "user", "content": user}]
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -63,14 +70,13 @@ async def _call_claude(
                     "model": ANTHROPIC_MODEL,
                     "max_tokens": max_tokens,
                     "system": system,
-                    "messages": [{"role": "user", "content": user}],
+                    "messages": messages,
                 },
             )
             r.raise_for_status()
             data = r.json()
             return data["content"][0]["text"]
     except httpx.HTTPStatusError as e:
-        # Log status + body so we see auth errors, rate limits, etc.
         logger.warning(
             "Claude API HTTP %s: %s", e.response.status_code, e.response.text[:300]
         )
@@ -91,32 +97,45 @@ class ParsedRequest:
 
 PARSE_SYSTEM = """You extract trip planning info from short messages.
 The user wants to get between Malta and Gozo (two islands in Malta).
-You must respond with ONLY a single JSON object, no preamble, no markdown.
+You must respond with ONLY a single JSON object, no preamble, no markdown, no code fences.
 
 Required fields:
-- "origin": place name as the user wrote it, normalised (e.g. "Sliema", "Valletta", "Victoria, Gozo", "Mġarr"). NEVER fabricate.
+- "origin": specific place name as the user wrote it (e.g. "Sliema", "Valletta", "Victoria", "Mġarr", "Xagħra"). NEVER include qualifiers like ", Gozo" or ", Malta". NEVER fabricate.
 - "destination": same rules as origin.
 - "deadline_hhmm": arrival deadline in "HH:MM" 24h format if user gave a time, else null.
-- "error": null normally, OR a short human-friendly explanation if you cannot extract origin AND destination.
+- "error": null normally, OR a short human-friendly clarification question if the request is ambiguous or missing info.
+
+CONTEXT HANDLING:
+If you see prior conversation in the message history, USE IT. A user saying "yes" or "Malta one" after you asked "did you mean Malta Airport?" should resolve to that destination. Don't ask again — combine all the info you have.
+
+DISAMBIGUATION:
+- "Airport" in Malta means Malta International Airport (Luqa) — there is no airport on Gozo. Treat "airport" as that, no need to clarify.
+- "Victoria" = the city in central Gozo (also called Rabat locally). Just return "Victoria".
+- "Rabat" is ambiguous — there's one on Malta and one on Gozo. ASK which.
 
 Examples:
 
 Input: "from Sliema to Victoria by 14:00"
-Output: {"origin": "Sliema", "destination": "Victoria, Gozo", "deadline_hhmm": "14:00", "error": null}
+Output: {"origin": "Sliema", "destination": "Victoria", "deadline_hhmm": "14:00", "error": null}
 
-Input: "I'm in Valletta need Gozo before 6pm"
-Output: {"origin": "Valletta", "destination": "Gozo", "deadline_hhmm": "18:00", "error": null}
+Input: "I'm in Xaghra need airport by 17:00 tomorrow"
+Output: {"origin": "Xagħra", "destination": "Malta International Airport", "deadline_hhmm": "17:00", "error": null}
 
 Input: "how do I get to Gozo"
-Output: {"origin": null, "destination": "Gozo", "deadline_hhmm": null, "error": "Please tell me where you are starting from."}
+Output: {"origin": null, "destination": "Gozo", "deadline_hhmm": null, "error": "Where are you starting from?"}
+
+Input: "from Sliema to Rabat"
+Output: {"origin": "Sliema", "destination": null, "deadline_hhmm": null, "error": "There are two Rabats — the one on Malta or the one on Gozo?"}
 
 Input: "хочу до Вікторії"
-Output: {"origin": null, "destination": "Victoria, Gozo", "deadline_hhmm": null, "error": "Please tell me where you are starting from."}
+Output: {"origin": null, "destination": "Victoria", "deadline_hhmm": null, "error": "Where are you starting from?"}
 """
 
 
-async def parse_request(text: str) -> ParsedRequest:
-    raw = await _call_claude(PARSE_SYSTEM, text, max_tokens=300)
+async def parse_request(
+    text: str, history: list[dict] | None = None,
+) -> ParsedRequest:
+    raw = await _call_claude(PARSE_SYSTEM, text, max_tokens=300, history=history)
     if raw is None:
         return ParsedRequest("", "", None, "AI is unavailable right now. Try again in a moment.")
 
@@ -163,37 +182,60 @@ class GeocodedPlace:
 
 
 async def geocode(place: str) -> GeocodedPlace | None:
-    """Geocode via Open-Meteo (free, no key). Filters to Malta."""
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(
-                "https://geocoding-api.open-meteo.com/v1/search",
-                params={
-                    "name": place,
-                    "count": 5,
-                    "language": "en",
-                    "format": "json",
-                },
-            )
-            r.raise_for_status()
-            data = r.json()
+    """Geocode via Open-Meteo (free, no key). Filters to Malta.
+    Tries the full string first, then progressively simpler variants
+    (strips trailing qualifiers like ', Gozo' / ', Malta')."""
+
+    def _variants(p: str) -> list[str]:
+        out = [p.strip()]
+        # Strip trailing ", X" qualifiers since they often confuse geocoder
+        if "," in p:
+            out.append(p.split(",")[0].strip())
+        # Strip leading articles
+        first = out[-1]
+        for prefix in ("the ", "The "):
+            if first.startswith(prefix):
+                out.append(first[len(prefix):])
+        return list(dict.fromkeys(v for v in out if v))  # dedup, keep order
+
+    for query in _variants(place):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(
+                    "https://geocoding-api.open-meteo.com/v1/search",
+                    params={
+                        "name": query,
+                        "count": 10,
+                        "language": "en",
+                        "format": "json",
+                    },
+                )
+                r.raise_for_status()
+                data = r.json()
+        except Exception as e:
+            logger.warning("Geocoding failed for %r: %s", query, e)
+            continue
 
         results = data.get("results") or []
-        # Prefer results in Malta (country code MT)
-        malta_hits = [r for r in results if r.get("country_code") == "MT"]
-        chosen = (malta_hits or results)[0] if (malta_hits or results) else None
+        # Prefer Malta (MT) results above all else
+        malta_hits = [h for h in results if h.get("country_code") == "MT"]
+        chosen = (malta_hits[0] if malta_hits
+                  else (results[0] if results else None))
 
-        if not chosen:
-            return None
-        lat, lon = chosen["latitude"], chosen["longitude"]
-        return GeocodedPlace(
-            name=chosen.get("name") or place,
-            lat=lat, lon=lon,
-            on_gozo=is_on_gozo(lat, lon),
-        )
-    except Exception as e:
-        logger.warning("Geocoding failed for %r: %s", place, e)
-        return None
+        if chosen:
+            lat, lon = chosen["latitude"], chosen["longitude"]
+            logger.info(
+                "Geocoded %r → %s (%.4f, %.4f, %s)",
+                place, chosen.get("name"), lat, lon, chosen.get("country_code"),
+            )
+            return GeocodedPlace(
+                name=chosen.get("name") or place,
+                lat=lat, lon=lon,
+                on_gozo=is_on_gozo(lat, lon),
+            )
+
+    logger.warning("All geocoding variants failed for %r", place)
+    return None
 
 
 # --- Step 3: figure out which ferry options apply ---
