@@ -213,8 +213,15 @@ async def geocode(place: str) -> GeocodedPlace | None:
         for prefix in ("the ", "The "):
             if first.startswith(prefix):
                 out.append(first[len(prefix):])
+        # Always also try with ", Malta" appended — disambiguates small
+        # Maltese places that collide with British/other names
+        # (e.g. "St Julians" → otherwise matches a UK village)
+        base = out[-1]
+        if "malta" not in base.lower() and "gozo" not in base.lower():
+            out.append(f"{base}, Malta")
         return list(dict.fromkeys(v for v in out if v))  # dedup, keep order
 
+    # First pass: try every variant, only accept Malta hits
     for query in _variants(place):
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -234,16 +241,14 @@ async def geocode(place: str) -> GeocodedPlace | None:
             continue
 
         results = data.get("results") or []
-        # Prefer Malta (MT) results above all else
         malta_hits = [h for h in results if h.get("country_code") == "MT"]
-        chosen = (malta_hits[0] if malta_hits
-                  else (results[0] if results else None))
 
-        if chosen:
+        if malta_hits:
+            chosen = malta_hits[0]
             lat, lon = chosen["latitude"], chosen["longitude"]
             logger.info(
-                "Geocoded %r → %s (%.4f, %.4f, %s)",
-                place, chosen.get("name"), lat, lon, chosen.get("country_code"),
+                "Geocoded %r → %s (%.4f, %.4f, MT)",
+                place, chosen.get("name"), lat, lon,
             )
             return GeocodedPlace(
                 name=chosen.get("name") or place,
@@ -251,7 +256,9 @@ async def geocode(place: str) -> GeocodedPlace | None:
                 on_gozo=is_on_gozo(lat, lon),
             )
 
-    logger.warning("All geocoding variants failed for %r", place)
+    # No Malta match anywhere — refuse rather than plan a trip from a
+    # foreign place that happens to share the name.
+    logger.warning("No Malta match for %r in any variant", place)
     return None
 
 
