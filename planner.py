@@ -16,6 +16,7 @@ If geocoding fails, we say so. If no ferry option fits, we explain why.
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
@@ -122,18 +123,13 @@ async def parse_request(text: str) -> ParsedRequest:
     # Log raw response so we can debug LLM weirdness in Render logs
     logger.info("LLM parse input=%r raw=%r", text, raw[:300])
 
-    # Strip code fences if Claude added them despite the prompt
+    # Extract JSON object from response. Claude often wraps JSON in
+    # ```json ... ``` fences despite instructions not to. Find the first
+    # {...} block and try to parse that.
     cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        # Remove ```json ... ``` or ``` ... ```
-        cleaned = cleaned.split("```", 2)
-        if len(cleaned) >= 2:
-            cleaned = cleaned[1]
-            if cleaned.startswith("json"):
-                cleaned = cleaned[4:]
-            cleaned = cleaned.strip().rstrip("`").strip()
-        else:
-            cleaned = raw.strip()
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if match:
+        cleaned = match.group(0)
 
     try:
         data = json.loads(cleaned)
