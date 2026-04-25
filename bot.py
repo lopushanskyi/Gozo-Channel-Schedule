@@ -85,8 +85,9 @@ async def fetch_live_schedule(date_obj: date_cls) -> dict | None:
         f"https://static.gozochannel.com/schedules/"
         f"{date_obj.year}/{date_obj.month:02d}/{date_obj.day:02d}/passenger.json"
     )
-    # Some CDNs (Cloudflare-fronted ones in particular) block default
-    # python-httpx User-Agent strings. Pretend to be a normal browser.
+    # Cloudflare-style protection in front of this CDN scrutinises more than
+    # just User-Agent — it looks for the full set of headers a real Chrome
+    # browser sends. Send them all to look legitimate.
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -94,10 +95,21 @@ async def fetch_live_schedule(date_obj: date_cls) -> dict | None:
             "Chrome/124.0.0.0 Safari/537.36"
         ),
         "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
         "Referer": "https://www.gozochannel.com/",
+        "Origin": "https://www.gozochannel.com",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"macOS"',
     }
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(
+            timeout=10.0, follow_redirects=True, http2=True,
+        ) as client:
             r = await client.get(url, headers=headers)
             r.raise_for_status()
             data = r.json()
