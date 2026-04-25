@@ -30,6 +30,7 @@ Telegram bot covering **both** Malta–Gozo ferry operators, with live sea-condi
 |---------|--------------|
 | `/start` | Welcome and command list |
 | `/next` | Next ferry — location + car/foot flow 📍 |
+| `/plan` | AI route planner — free-form trips with deadlines |
 | `/mgarr` | Gozo Channel: next 3 from Mġarr → Ċirkewwa |
 | `/cirkewwa` | Gozo Channel: next 3 from Ċirkewwa → Mġarr |
 | `/fastferry` | Fast Ferry: next in both directions |
@@ -105,6 +106,30 @@ export TELEGRAM_BOT_TOKEN="..."
 export WEBHOOK_URL="https://your-tunnel-url"
 python bot.py
 ```
+
+## AI route planner (`/plan`)
+
+A natural-language planner powered by Claude Haiku. Users write what they want in plain English (or any language Claude knows), and the bot figures out which ferry option fits.
+
+```
+/plan from Sliema to Victoria by 14:00
+```
+
+**Pipeline:**
+1. **Parse** — Claude extracts `origin`, `destination`, `deadline_hhmm` from free text
+2. **Geocode** — Open-Meteo geocoding API (free) finds coordinates for each place
+3. **Island detection** — same `lat ≥ 36.00°N` logic; rejects same-island trips
+4. **Fetch departures** — uses the existing Gozo Channel + Fast Ferry code
+5. **Compose** — Claude writes a short Telegram-friendly answer with one recommended option and a brief alternative
+
+**Cost:** ~$0.003 per `/plan` request (Claude Haiku). $5 of credit lasts ~1500 plans.
+
+**Limitations (intentional):**
+- Doesn't know bus schedules — says "you'll need to get to <terminal>" without specific times
+- Doesn't book or check bus routes — just the ferry leg with terminal-to-terminal timing
+- Will refuse same-island trips ("both Valletta and Sliema are on Malta — no ferry needed")
+
+If `ANTHROPIC_API_KEY` is unset, `/plan` gracefully tells the user AI is unavailable.
 
 ## Tech stack
 

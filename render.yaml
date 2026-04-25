@@ -10,5 +10,7 @@ services:
         sync: false  # set in Render dashboard
       - key: ADMIN_USER_ID
         sync: false  # set in Render dashboard (your Telegram user ID)
+      - key: ANTHROPIC_API_KEY
+        sync: false  # set in Render dashboard (for /plan)
       - key: PYTHON_VERSION
         value: 3.12.3

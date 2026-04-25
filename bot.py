@@ -33,6 +33,7 @@ from telegram.ext import (
 )
 
 import analytics
+import planner
 
 # --- Config ---
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -504,6 +505,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  • *Fast Ferry* — passenger only, Valletta ↔ Mġarr (~45 min)\n\n"
         "Commands:\n"
         "/next — next ferry from your location\n"
+        "/plan — AI route planner (e.g. _from Sliema to Victoria by 14:00_)\n"
         "/mgarr — next 3 Gozo Channel from Mġarr\n"
         "/cirkewwa — next 3 Gozo Channel from Ċirkewwa\n"
         "/fastferry — next Fast Ferry in both directions\n"
@@ -562,12 +564,18 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text.lower()
+    text = update.message.text
+    text_lower = text.lower()
     pending = context.user_data.get("pending_island")
 
+    # Conversational follow-up for /plan
+    if context.user_data.pop("awaiting_plan", False):
+        await _run_plan(update, text)
+        return
+
     # Step 2: mode selection (island already known)
-    if pending and ("car" in text or "foot" in text):
-        mode = "car" if "car" in text else "foot"
+    if pending and ("car" in text_lower or "foot" in text_lower):
+        mode = "car" if "car" in text_lower else "foot"
         analytics.log_mode_choice(mode)
         location = context.user_data.get("pending_location")  # may be None
         context.user_data.pop("pending_island", None)
@@ -576,12 +584,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # Step 1: island selection (manual, no location)
-    if "gozo" in text:
+    if "gozo" in text_lower:
         context.user_data["pending_island"] = "gozo"
         context.user_data.pop("pending_location", None)
         analytics.log_island_pick("gozo", from_location=False)
         await _ask_mode(update)
-    elif "malta" in text:
+    elif "malta" in text_lower:
         context.user_data["pending_island"] = "malta"
         context.user_data.pop("pending_location", None)
         analytics.log_island_pick("malta", from_location=False)
@@ -808,6 +816,133 @@ async def sea(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+# --- /plan: LLM-powered route planner ---
+async def plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    analytics.log_command("plan")
+    # Clear unrelated conversation state
+    context.user_data.pop("pending_island", None)
+    context.user_data.pop("pending_location", None)
+
+    # Did the user include the request inline? "/plan from X to Y by 14:00"
+    args_text = " ".join(context.args).strip() if context.args else ""
+
+    if not args_text:
+        # Ask conversationally — set a flag so next text message is treated as the plan input
+        context.user_data["awaiting_plan"] = True
+        await update.message.reply_text(
+            "🗺 *Trip planner*\n\n"
+            "Tell me where you are, where you're going, and (optionally) when "
+            "you need to be there.\n\n"
+            "Example: _from Sliema to Victoria by 14:00_",
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    await _run_plan(update, args_text)
+
+
+async def _run_plan(update: Update, request_text: str) -> None:
+    """Heavy lifting for the planner — geocode, fetch, LLM, format."""
+    # Acknowledge so the user knows something is happening (LLM call ~2s)
+    progress_msg = await update.message.reply_text("🤔 Planning…")
+
+    try:
+        # Step 1: parse with LLM
+        parsed = await planner.parse_request(request_text)
+        if parsed.error:
+            await progress_msg.edit_text(parsed.error)
+            return
+
+        # Step 2: geocode both ends
+        origin_geo = await planner.geocode(parsed.origin)
+        dest_geo = await planner.geocode(parsed.destination)
+        if origin_geo is None or dest_geo is None:
+            missing = parsed.origin if origin_geo is None else parsed.destination
+            await progress_msg.edit_text(
+                f"I couldn't find *{missing}* on the map. "
+                "Try a more specific name (e.g. 'Sliema, Malta').",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Step 3: same-island check
+        if origin_geo.on_gozo == dest_geo.on_gozo and origin_geo.on_gozo is not None:
+            await progress_msg.edit_text(
+                f"Both *{origin_geo.name}* and *{dest_geo.name}* are on the same "
+                "island — no ferry needed. I only handle Malta ↔ Gozo trips.",
+                parse_mode="Markdown",
+            )
+            return
+
+        if origin_geo.on_gozo is None or dest_geo.on_gozo is None:
+            await progress_msg.edit_text(
+                "One of those places doesn't seem to be in Malta. "
+                "I only handle trips between Malta and Gozo.",
+            )
+            return
+
+        # Step 4: fetch ferry departures for relevant options
+        now = datetime.now(MALTA_TZ)
+        options = planner.applicable_options(origin_geo.on_gozo, dest_geo.on_gozo)
+
+        ferry_data: dict = {}
+        for opt in options:
+            if opt.operator == "Gozo Channel":
+                deps, _meta = await next_gc_departures(
+                    opt.direction_key, now, limit=5
+                )
+                ferry_data[f"{opt.operator} ({opt.from_terminal} → {opt.to_terminal})"] = [
+                    {
+                        "departing": d.strftime("%H:%M"),
+                        "crossing_minutes": opt.crossing_minutes,
+                    }
+                    for d in deps
+                ]
+            else:  # Fast Ferry
+                if origin_geo.on_gozo:
+                    ff_deps = await next_fast_ferry(FF_MGARR, FF_VALLETTA, now, limit=5)
+                else:
+                    ff_deps = await next_fast_ferry(FF_VALLETTA, FF_MGARR, now, limit=5)
+                ferry_data[f"{opt.operator} ({opt.from_terminal} → {opt.to_terminal})"] = [
+                    {
+                        "departing": t["departing"].strftime("%H:%M"),
+                        "vessel": t["vessel"] or None,
+                        "seats_economy": t["seats"] if t["seats"] >= 0 else None,
+                        "crossing_minutes": opt.crossing_minutes,
+                    }
+                    for t in ff_deps
+                ]
+
+        # Step 5: sea conditions for the LLM to optionally mention
+        sea_data = await fetch_sea_conditions()
+
+        # Step 6: LLM writes the plan
+        ctx = planner.build_planning_context(
+            parsed, origin_geo, dest_geo, ferry_data, sea_data, now,
+        )
+        plan_text = await planner.write_plan(ctx)
+
+        if not plan_text:
+            await progress_msg.edit_text(
+                "AI couldn't generate a plan right now. "
+                "Try /next or /fastferry directly."
+            )
+            return
+
+        await progress_msg.edit_text(plan_text, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.exception("Plan handler failed: %s", e)
+        analytics.log_error("plan_handler")
+        try:
+            await progress_msg.edit_text(
+                "Something went wrong while planning. Try /next or /fastferry."
+            )
+        except Exception:
+            pass
+
+
 # --- Admin: stats ---
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else None
@@ -835,6 +970,7 @@ def main() -> None:
     app.add_handler(CommandHandler("fastferry", fastferry))
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("sea", sea))
+    app.add_handler(CommandHandler("plan", plan))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
