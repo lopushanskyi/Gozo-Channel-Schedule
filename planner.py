@@ -25,7 +25,6 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"  # fast and cheap
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
@@ -45,7 +44,8 @@ async def _call_claude(
     system: str, user: str, max_tokens: int = 1024
 ) -> str | None:
     """Single Claude API call. Returns text or None on failure."""
-    if not ANTHROPIC_API_KEY:
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
         logger.warning("ANTHROPIC_API_KEY not set — LLM disabled")
         return None
 
@@ -54,7 +54,7 @@ async def _call_claude(
             r = await client.post(
                 ANTHROPIC_URL,
                 headers={
-                    "x-api-key": ANTHROPIC_API_KEY,
+                    "x-api-key": api_key,
                     "anthropic-version": "2023-06-01",
                     "content-type": "application/json",
                 },
@@ -68,6 +68,12 @@ async def _call_claude(
             r.raise_for_status()
             data = r.json()
             return data["content"][0]["text"]
+    except httpx.HTTPStatusError as e:
+        # Log status + body so we see auth errors, rate limits, etc.
+        logger.warning(
+            "Claude API HTTP %s: %s", e.response.status_code, e.response.text[:300]
+        )
+        return None
     except Exception as e:
         logger.warning("Claude API call failed: %s", e)
         return None
