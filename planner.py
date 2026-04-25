@@ -113,8 +113,24 @@ async def parse_request(text: str) -> ParsedRequest:
     if raw is None:
         return ParsedRequest("", "", None, "AI is unavailable right now. Try again in a moment.")
 
+    # Log raw response so we can debug LLM weirdness in Render logs
+    logger.info("LLM parse input=%r raw=%r", text, raw[:300])
+
+    # Strip code fences if Claude added them despite the prompt
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        # Remove ```json ... ``` or ``` ... ```
+        cleaned = cleaned.split("```", 2)
+        if len(cleaned) >= 2:
+            cleaned = cleaned[1]
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
+            cleaned = cleaned.strip().rstrip("`").strip()
+        else:
+            cleaned = raw.strip()
+
     try:
-        data = json.loads(raw.strip())
+        data = json.loads(cleaned)
     except json.JSONDecodeError:
         logger.warning("LLM returned non-JSON: %r", raw[:200])
         return ParsedRequest("", "", None, "Sorry, I couldn't understand that. Try: 'from Sliema to Victoria by 14:00'.")
@@ -125,6 +141,7 @@ async def parse_request(text: str) -> ParsedRequest:
             data.get("deadline_hhmm"), data["error"],
         )
     if not data.get("origin") or not data.get("destination"):
+        logger.warning("LLM missing origin/destination: %r", data)
         return ParsedRequest("", "", None, "I need both origin and destination. Try: 'from Sliema to Victoria by 14:00'.")
 
     return ParsedRequest(
