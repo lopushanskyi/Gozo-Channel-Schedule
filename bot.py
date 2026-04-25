@@ -226,18 +226,29 @@ async def fetch_fast_ferry(
             for item in raw:
                 voyages = item.get("voyages") or []
                 v = voyages[0] if voyages else {}
-                dt = datetime.fromisoformat(item["departingTime"]).replace(
-                    tzinfo=MALTA_TZ
-                )
+                # API returns ISO timestamps. They appear to be in Malta local
+                # time (no tz suffix). If the API ever changes to UTC, parse
+                # below will detect the suffix.
+                ts_str = item["departingTime"]
+                if ts_str.endswith("Z"):
+                    ts_str = ts_str[:-1] + "+00:00"
+                parsed = datetime.fromisoformat(ts_str)
+                if parsed.tzinfo is None:
+                    # Naive timestamp — interpret as Malta local time
+                    parsed = parsed.replace(tzinfo=MALTA_TZ)
+                else:
+                    parsed = parsed.astimezone(MALTA_TZ)
                 trips.append({
-                    "departing": dt,
+                    "departing": parsed,
                     "vessel": v.get("vesselName") or "",
                     "seats": v.get("seatsEconomy", -1),
                 })
             _fast_ferry_cache[cache_key] = (trips, now_ts)
+            sample = ", ".join(t["departing"].strftime("%H:%M") for t in trips[:5])
             logger.info(
-                "Fetched Fast Ferry %s → %s for %s (%d trips)",
+                "Fetched Fast Ferry %s → %s for %s (%d trips: %s%s)",
                 departing, arriving, for_date, len(trips),
+                sample, "..." if len(trips) > 5 else "",
             )
             return trips
     except Exception as e:
@@ -262,6 +273,47 @@ async def next_fast_ferry(
         future.extend(tomorrow_trips[: limit - len(future)])
 
     return future[:limit]
+
+
+# Days to sample when establishing the "normal" trip count baseline.
+FF_BASELINE_DAYS = (2, 3, 4, 7)
+# If today's count is below this fraction of the baseline, flag as restricted.
+FF_RESTRICTED_THRESHOLD = 0.6
+
+
+async def is_fast_ferry_restricted(
+    departing: str, arriving: str, for_date: date_cls
+) -> bool:
+    """
+    Detects whether `for_date` has an unusually small Fast Ferry schedule
+    compared to nearby reference days. Used to warn users when the operator
+    has cancelled trips (e.g. fireworks festival, weather, maintenance).
+
+    Returns True only if we have a clear baseline AND today's count is well
+    below it. False otherwise (don't warn on uncertainty).
+    """
+    today_trips = await fetch_fast_ferry(departing, arriving, for_date)
+    if today_trips is None:
+        return False
+    today_count = len(today_trips)
+    if today_count == 0:
+        return True  # no service at all today is definitely abnormal
+
+    # Sample baseline from nearby future dates (same weekday-ish, fewer
+    # surprises than past dates whose data may already be archived).
+    baseline_counts: list[int] = []
+    for offset in FF_BASELINE_DAYS:
+        ref = await fetch_fast_ferry(
+            departing, arriving, for_date + timedelta(days=offset)
+        )
+        if ref is not None and len(ref) > 0:
+            baseline_counts.append(len(ref))
+
+    if len(baseline_counts) < 2:
+        return False  # not enough data to judge
+
+    baseline = sum(baseline_counts) / len(baseline_counts)
+    return today_count < baseline * FF_RESTRICTED_THRESHOLD
 
 
 def seat_warning(seats: int) -> str:
@@ -588,6 +640,17 @@ async def _send_results(
         else:
             lines.append("  No more today")
 
+        # Warn if today's Fast Ferry schedule is unusually short
+        ff_dep, ff_arr = (
+            (FF_MGARR, FF_VALLETTA) if island == "gozo"
+            else (FF_VALLETTA, FF_MGARR)
+        )
+        if await is_fast_ferry_restricted(ff_dep, ff_arr, now.date()):
+            lines.append(
+                "  _⚠️ Fast Ferry running a restricted schedule today — "
+                "check gozohighspeed.com_"
+            )
+
     conditions = await fetch_sea_conditions()
     lines.append(format_conditions(conditions))
 
@@ -666,6 +729,17 @@ async def fastferry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append("  No upcoming trips")
 
     lines.append("\n_Bookings may be required — check gozohighspeed.com_")
+
+    # Restricted-schedule warnings (check both directions independently)
+    today = now.date()
+    if (
+        await is_fast_ferry_restricted(FF_VALLETTA, FF_MGARR, today)
+        or await is_fast_ferry_restricted(FF_MGARR, FF_VALLETTA, today)
+    ):
+        lines.insert(
+            1,
+            "_⚠️ Restricted schedule today — fewer trips than usual._\n",
+        )
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
