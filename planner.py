@@ -101,7 +101,7 @@ The user wants to get between Malta and Gozo (two islands in Malta).
 You must respond with ONLY a single JSON object, no preamble, no markdown, no code fences.
 
 Required fields:
-- "origin": specific place name as the user wrote it (e.g. "Sliema", "Valletta", "Victoria", "Mġarr", "Xagħra"). NEVER include qualifiers like ", Gozo" or ", Malta". NEVER fabricate. ALWAYS restore Maltese diacritics if you recognise the place: "Xaghra"→"Xagħra", "Mgarr"→"Mġarr", "Zebbug"→"Żebbuġ", "Ghajnsielem"→"Għajnsielem", "Gzira"→"Gżira", "Qrendi"→"Qrendi", etc.
+- "origin": specific place name as the user wrote it (e.g. "Sliema", "Valletta", "Victoria", "Mġarr", "Xagħra"). NEVER include qualifiers like ", Gozo" or ", Malta". NEVER fabricate. ALWAYS restore Maltese diacritics if you recognise the place: "Xaghra"→"Xagħra", "Mgarr"→"Mġarr", "Mellieha"→"Mellieħa", "Gzira"→"Gżira", "Zebbug"→"Żebbuġ", "Ghajnsielem"→"Għajnsielem", "Bugibba"→"Buġibba", "Hamrun"→"Ħamrun". For "St Paul's Bay" / "St Pauls Bay" / "St. Paul's Bay" always normalise to "St Paul's Bay". For "St Julian's" / "St Julians" always "St Julian's".
 - "destination": same rules as origin.
 - "deadline_hhmm": arrival deadline in "HH:MM" 24h format if user gave a time, else null.
 - "deadline_date": ISO date "YYYY-MM-DD" the deadline applies to. Resolve relative words ("today", "tomorrow", "next Monday") using the current date provided in CONTEXT. If no date is specified but a time is, default to "today" if that time hasn't passed yet, else "tomorrow". If no deadline at all, null.
@@ -206,22 +206,46 @@ async def geocode(place: str) -> GeocodedPlace | None:
     # Common Maltese letters often typed without diacritics by tourists.
     # We try the user's spelling first, then add a diacritic-restored variant.
     _MALTESE_FIXUPS = [
+        # Gozo
         ("xaghra", "Xagħra"),
         ("mgarr", "Mġarr"),
+        ("ghajnsielem", "Għajnsielem"),
+        ("ghasri", "Għasri"),
+        ("gharb", "Għarb"),
+        ("xewkija", "Xewkija"),
+        ("sannat", "Sannat"),
+        ("qala", "Qala"),
+        ("kercem", "Kerċem"),
+        ("nadur", "Nadur"),
+        ("zebbug gozo", "Żebbuġ"),
+        # Malta — northern (popular with ferry users)
+        ("mellieha", "Mellieħa"),
+        ("st pauls bay", "St Paul's Bay"),
+        ("st paul's bay", "St Paul's Bay"),
+        ("st pauls", "St Paul's Bay"),
+        ("bugibba", "Buġibba"),
+        ("qawra", "Qawra"),
+        ("xemxija", "Xemxija"),
+        ("st julians", "St Julian's"),
+        ("st julian's", "St Julian's"),
+        ("paceville", "Paceville"),
+        ("gzira", "Gżira"),
+        ("msida", "Msida"),
+        # Malta — central/south
         ("zebbug", "Żebbuġ"),
         ("zejtun", "Żejtun"),
         ("zurrieq", "Żurrieq"),
         ("zabbar", "Żabbar"),
         ("birzebbuga", "Birżebbuġa"),
         ("zebbiegh", "Żebbiegħ"),
-        ("ghajnsielem", "Għajnsielem"),
-        ("ghasri", "Għasri"),
-        ("gharb", "Għarb"),
-        ("xewkija", "Xewkija"),
+        ("birkirkara", "Birkirkara"),
+        ("hamrun", "Ħamrun"),
+        ("attard", "Attard"),
+        ("balzan", "Balzan"),
         ("rabat", "Rabat"),
-        ("sannat", "Sannat"),
-        ("qala", "Qala"),
-        ("kercem", "Kerċem"),
+        ("mdina", "Mdina"),
+        ("marsaskala", "Marsaskala"),
+        ("marsaxlokk", "Marsaxlokk"),
     ]
 
     def _variants(p: str) -> list[str]:
@@ -401,12 +425,20 @@ DEADLINE LOGIC:
 PICKING BETWEEN OPERATORS:
 - Gozo Channel: car ferry, runs 24/7, Ċirkewwa ↔ Mġarr (~25 min). On Malta side it's at the very north, ~1h by bus from Valletta.
 - Fast Ferry: passenger only, runs from THREE Malta ports (seasonal availability — ports without trips in `ferry_options` are not running today):
-  • Valletta ↔ Mġarr (~45 min) — best if user is in/near Valletta or southern Malta
-  • Sliema ↔ Mġarr (~60 min, may include a transfer at Bugibba) — best if user is in Sliema/St Julian's area
-  • Bugibba ↔ Mġarr (~35 min) — best if user is in northern Malta (Bugibba, Qawra, St Paul's Bay, Mellieħa)
+  • Valletta ↔ Mġarr (~45 min)
+  • Sliema ↔ Mġarr (~60 min, may include a transfer at Bugibba)
+  • Bugibba ↔ Mġarr (~35 min)
 - If a Fast Ferry trip has `transfer_at`, mention it briefly so the user knows there's a change.
 - If user has a car → Gozo Channel usually wins (no booking needed, more frequent).
-- If user is on foot → pick the Fast Ferry port closest to them. Don't recommend a port with no service.
+
+WHEN PICKING WHICH FAST FERRY PORT, USE THE MALTA-SIDE GEOGRAPHY OF THE DESTINATION (or origin if the trip is Gozo→Malta):
+- Valletta port → best for: Valletta itself, Floriana, Ħamrun, southern Malta (Marsaskala, Birżebbuġa, the airport).
+- Sliema port → best for: Sliema, Gżira, Msida, St Julian's, Paceville, Ta' Xbiex (the central-east coastal strip).
+- Bugibba port → best for: Buġibba, Qawra, St Paul's Bay, Mellieħa, Xemxija, Mġarr (Malta) — basically the entire northern bay region.
+
+Reason about which Malta port is geographically closest to the destination (or origin), not just where Fast Ferry historically went. For example: Gżira is right next to Sliema, so Sliema is the obvious port — NOT Valletta, even though both reach the same general area.
+
+If the closest port has no trips in `ferry_options` for the requested time, fall back to the next-closest port and explicitly mention this trade-off (e.g. "Sliema route is sold out / not running; Valletta is the next-closest option, then a 15-min bus to Gżira").
 
 OUTPUT FORMAT EXAMPLE:
 
