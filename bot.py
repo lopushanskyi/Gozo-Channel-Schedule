@@ -343,28 +343,40 @@ async def is_fast_ferry_restricted(
 
     Returns True only if we have a clear baseline AND today's count is well
     below it. False otherwise (don't warn on uncertainty).
+
+    NOTE: Sliema and Bugibba routes are seasonal (March–October). We avoid
+    flagging them as "restricted" off-season — that's normal, not anomalous.
+    Only flag if BOTH today's count is low AND the baseline shows the route
+    normally runs (so the gap is unexpected).
     """
     today_trips = await fetch_fast_ferry(departing, arriving, for_date)
     if today_trips is None:
         return False
     today_count = len(today_trips)
-    if today_count == 0:
-        return True  # no service at all today is definitely abnormal
 
-    # Sample baseline from nearby future dates (same weekday-ish, fewer
-    # surprises than past dates whose data may already be archived).
+    # Sample baseline from nearby future dates
     baseline_counts: list[int] = []
     for offset in FF_BASELINE_DAYS:
         ref = await fetch_fast_ferry(
             departing, arriving, for_date + timedelta(days=offset)
         )
-        if ref is not None and len(ref) > 0:
+        if ref is not None:
             baseline_counts.append(len(ref))
 
     if len(baseline_counts) < 2:
         return False  # not enough data to judge
 
     baseline = sum(baseline_counts) / len(baseline_counts)
+
+    # Off-season check: if the route is consistently quiet across reference
+    # days too (baseline near zero), this is a seasonal route that's not
+    # running — don't flag as restricted.
+    if baseline < 3:
+        return False
+
+    if today_count == 0:
+        return True  # baseline shows route runs, but no trips today → restricted
+
     return today_count < baseline * FF_RESTRICTED_THRESHOLD
 
 

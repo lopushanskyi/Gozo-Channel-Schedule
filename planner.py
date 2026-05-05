@@ -346,9 +346,9 @@ def applicable_options(
             FerryOption("Fast Ferry", "Mġarr", "Valletta",
                         "ff_gozo_to_valletta", 45),
             FerryOption("Fast Ferry", "Mġarr", "Sliema",
-                        "ff_gozo_to_sliema", 60),
+                        "ff_gozo_to_sliema", 75),  # ~45 + ~15-30 min transfer wait
             FerryOption("Fast Ferry", "Mġarr", "Bugibba",
-                        "ff_gozo_to_bugibba", 35),
+                        "ff_gozo_to_bugibba", 30),
         ]
     else:  # Malta → Gozo
         return [
@@ -357,9 +357,9 @@ def applicable_options(
             FerryOption("Fast Ferry", "Valletta", "Mġarr",
                         "ff_valletta_to_gozo", 45),
             FerryOption("Fast Ferry", "Sliema", "Mġarr",
-                        "ff_sliema_to_gozo", 60),
+                        "ff_sliema_to_gozo", 75),  # ~45 + ~15-30 min transfer wait
             FerryOption("Fast Ferry", "Bugibba", "Mġarr",
-                        "ff_bugibba_to_gozo", 35),
+                        "ff_bugibba_to_gozo", 30),
         ]
 
 
@@ -424,11 +424,11 @@ DEADLINE LOGIC:
 
 PICKING BETWEEN OPERATORS:
 - Gozo Channel: car ferry, runs 24/7, Ċirkewwa ↔ Mġarr (~25 min). On Malta side it's at the very north, ~1h by bus from Valletta.
-- Fast Ferry: passenger only, runs from THREE Malta ports (seasonal availability — ports without trips in `ferry_options` are not running today):
-  • Valletta ↔ Mġarr (~45 min)
-  • Sliema ↔ Mġarr (~60 min, may include a transfer at Bugibba)
-  • Bugibba ↔ Mġarr (~35 min)
-- If a Fast Ferry trip has `transfer_at`, mention it briefly so the user knows there's a change.
+- Fast Ferry: passenger only, runs from THREE Malta ports. Note that Sliema and Buġibba routes are SEASONAL (March–October only) — if user is asking about November–February, only Valletta will be available.
+  • Valletta ↔ Mġarr (~45 min) — runs all year
+  • Sliema ↔ Mġarr (~75 min including transfer at Buġibba) — March–October only
+  • Buġibba ↔ Mġarr (~30 min) — March–October only
+- If a Fast Ferry trip has `transfer_at`, mention it briefly so the user knows there's a change. The Sliema route always involves a Bugibba transfer with ~15 min wait.
 - If user has a car → Gozo Channel usually wins (no booking needed, more frequent).
 
 WHEN PICKING WHICH FAST FERRY PORT, USE THE MALTA-SIDE GEOGRAPHY OF THE DESTINATION (or origin if the trip is Gozo→Malta):
