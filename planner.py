@@ -303,8 +303,12 @@ def applicable_options(
     origin_on_gozo: Optional[bool], dest_on_gozo: Optional[bool],
 ) -> list[FerryOption]:
     """
-    Both operators run between the islands. We list both — the LLM in step 5
-    will reason about which is more convenient given the user's actual coords.
+    Both operators run between the islands. We list every plausible option —
+    the LLM in step 5 will reason about which is most convenient given the
+    user's actual coordinates.
+
+    Fast Ferry has multiple Malta-side ports (Valletta, Sliema, Bugibba).
+    All three appear here; the LLM picks based on origin proximity.
     """
     if origin_on_gozo is None or dest_on_gozo is None:
         return []
@@ -316,14 +320,22 @@ def applicable_options(
             FerryOption("Gozo Channel", "Mġarr", "Ċirkewwa",
                         "mgarr_to_cirkewwa", 25),
             FerryOption("Fast Ferry", "Mġarr", "Valletta",
-                        "ff_mgarr_to_valletta", 45),
+                        "ff_gozo_to_valletta", 45),
+            FerryOption("Fast Ferry", "Mġarr", "Sliema",
+                        "ff_gozo_to_sliema", 60),
+            FerryOption("Fast Ferry", "Mġarr", "Bugibba",
+                        "ff_gozo_to_bugibba", 35),
         ]
     else:  # Malta → Gozo
         return [
             FerryOption("Gozo Channel", "Ċirkewwa", "Mġarr",
                         "cirkewwa_to_mgarr", 25),
             FerryOption("Fast Ferry", "Valletta", "Mġarr",
-                        "ff_valletta_to_mgarr", 45),
+                        "ff_valletta_to_gozo", 45),
+            FerryOption("Fast Ferry", "Sliema", "Mġarr",
+                        "ff_sliema_to_gozo", 60),
+            FerryOption("Fast Ferry", "Bugibba", "Mġarr",
+                        "ff_bugibba_to_gozo", 35),
         ]
 
 
@@ -388,9 +400,13 @@ DEADLINE LOGIC:
 
 PICKING BETWEEN OPERATORS:
 - Gozo Channel: car ferry, runs 24/7, Ċirkewwa ↔ Mġarr (~25 min). On Malta side it's at the very north, ~1h by bus from Valletta.
-- Fast Ferry: passenger only, Valletta ↔ Mġarr (~45 min). Convenient if user is in/near Valletta.
-- If user is near Valletta or Sliema and on foot → Fast Ferry usually wins.
-- If user is in central/north Malta or has a car → Gozo Channel usually wins.
+- Fast Ferry: passenger only, runs from THREE Malta ports (seasonal availability — ports without trips in `ferry_options` are not running today):
+  • Valletta ↔ Mġarr (~45 min) — best if user is in/near Valletta or southern Malta
+  • Sliema ↔ Mġarr (~60 min, may include a transfer at Bugibba) — best if user is in Sliema/St Julian's area
+  • Bugibba ↔ Mġarr (~35 min) — best if user is in northern Malta (Bugibba, Qawra, St Paul's Bay, Mellieħa)
+- If a Fast Ferry trip has `transfer_at`, mention it briefly so the user knows there's a change.
+- If user has a car → Gozo Channel usually wins (no booking needed, more frequent).
+- If user is on foot → pick the Fast Ferry port closest to them. Don't recommend a port with no service.
 
 OUTPUT FORMAT EXAMPLE:
 

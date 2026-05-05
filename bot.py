@@ -212,8 +212,21 @@ async def next_gc_departures(
 
 
 # --- Gozo Fast Ferry (REST API) ---
+# In April 2026 the operator renamed the Gozo terminal in their API
+# from "Imgarr (Gozo)" to just "Gozo", and added two new Malta-side
+# ports: Sliema and Bugibba (seasonal, March–October).
 FF_VALLETTA = "Valletta"
-FF_MGARR = "Imgarr (Gozo)"
+FF_SLIEMA = "Sliema"
+FF_BUGIBBA = "Bugibba"
+FF_GOZO = "Gozo"
+
+# All Malta-side Fast Ferry ports (in order of historical adoption).
+# Used to fan-out when planning trips and to render schedules.
+FF_MALTA_PORTS = [FF_VALLETTA, FF_SLIEMA, FF_BUGIBBA]
+
+# Backward compat: old code referred to FF_MGARR. Keep an alias so any
+# stale reference doesn't break — points to the new harbour name.
+FF_MGARR = FF_GOZO
 
 
 async def fetch_fast_ferry(
@@ -245,23 +258,42 @@ async def fetch_fast_ferry(
             trips = []
             for item in raw:
                 voyages = item.get("voyages") or []
-                v = voyages[0] if voyages else {}
-                # API returns ISO timestamps. They appear to be in Malta local
-                # time (no tz suffix). If the API ever changes to UTC, parse
-                # below will detect the suffix.
+                # Most trips are direct (1 voyage). Sliema→Gozo and similar
+                # are sold as a single ticket but operated as two voyages
+                # with a transfer (typically at Bugibba). Capture that.
+                first_v = voyages[0] if voyages else {}
                 ts_str = item["departingTime"]
                 if ts_str.endswith("Z"):
                     ts_str = ts_str[:-1] + "+00:00"
                 parsed = datetime.fromisoformat(ts_str)
                 if parsed.tzinfo is None:
-                    # Naive timestamp — interpret as Malta local time
                     parsed = parsed.replace(tzinfo=MALTA_TZ)
                 else:
                     parsed = parsed.astimezone(MALTA_TZ)
+
+                # Transfer info: where the change happens (if any)
+                transfer_at = None
+                if len(voyages) > 1:
+                    transfer_at = voyages[0].get("arrivalHarbor")
+
+                # Seats: take the minimum across legs, since you need a
+                # seat on each. Skip negative/missing values.
+                seat_values = [
+                    v.get("seatsEconomy") for v in voyages
+                    if isinstance(v.get("seatsEconomy"), int)
+                    and v["seatsEconomy"] >= 0
+                ]
+                min_seats = min(seat_values) if seat_values else -1
+
+                # Vessel: name the first leg's vessel; for transfers we
+                # mention "+ transfer" alongside the time
+                vessel = first_v.get("vesselName") or ""
+
                 trips.append({
                     "departing": parsed,
-                    "vessel": v.get("vesselName") or "",
-                    "seats": v.get("seatsEconomy", -1),
+                    "vessel": vessel,
+                    "seats": min_seats,
+                    "transfer_at": transfer_at,  # None if direct
                 })
             _fast_ferry_cache[cache_key] = (trips, now_ts)
             sample = ", ".join(t["departing"].strftime("%H:%M") for t in trips[:5])
@@ -351,6 +383,8 @@ def format_fast_ferry_line(trip: dict, now: datetime, prefix: str) -> str:
     line = f"{prefix} {dt.strftime('%H:%M')} ({format_delta(dt - now)})"
     if trip["vessel"]:
         line += f" — {trip['vessel']}"
+    if trip.get("transfer_at"):
+        line += f" (change at {trip['transfer_at']})"
     line += seat_warning(trip["seats"])
     return line
 
@@ -521,13 +555,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🛳 *Gozo ↔ Malta Ferries*\n\n"
         "I track two operators:\n"
         "  • *Gozo Channel* — car ferry, Ċirkewwa ↔ Mġarr (~25 min)\n"
-        "  • *Fast Ferry* — passenger only, Valletta ↔ Mġarr (~45 min)\n\n"
+        "  • *Fast Ferry* — passenger only, from Valletta / Sliema / Bugibba ↔ Mġarr\n\n"
         "Commands:\n"
         "/next — next ferry from your location\n"
         "/plan — AI route planner (e.g. _from Sliema to Victoria by 14:00_)\n"
         "/mgarr — next 3 Gozo Channel from Mġarr\n"
         "/cirkewwa — next 3 Gozo Channel from Ċirkewwa\n"
-        "/fastferry — next Fast Ferry in both directions\n"
+        "/fastferry — next Fast Ferry across all routes\n"
         "/today — full schedule for today\n"
         "/sea — current sea conditions"
     )
@@ -632,22 +666,25 @@ async def _send_results(
 
     if island == "gozo":
         gc_deps, gc_meta = await next_gc_departures("mgarr_to_cirkewwa", now, limit=3)
-        ff_deps = (
-            await next_fast_ferry(FF_MGARR, FF_VALLETTA, now, limit=3)
-            if mode == "foot" else []
-        )
+        # For foot users on Gozo, fetch Fast Ferry to all Malta ports
+        ff_routes: list[tuple[str, list[dict]]] = []
+        if mode == "foot":
+            for port in FF_MALTA_PORTS:
+                trips = await next_fast_ferry(FF_GOZO, port, now, limit=3)
+                if trips:
+                    ff_routes.append((f"Gozo → {port}", trips))
         island_label = "Gozo"
         gc_label = "Gozo Channel — Mġarr → Ċirkewwa"
-        ff_label = "Fast Ferry — Mġarr → Valletta"
     else:  # malta
         gc_deps, gc_meta = await next_gc_departures("cirkewwa_to_mgarr", now, limit=3)
-        ff_deps = (
-            await next_fast_ferry(FF_VALLETTA, FF_MGARR, now, limit=3)
-            if mode == "foot" else []
-        )
+        ff_routes = []
+        if mode == "foot":
+            for port in FF_MALTA_PORTS:
+                trips = await next_fast_ferry(port, FF_GOZO, now, limit=3)
+                if trips:
+                    ff_routes.append((f"{port} → Gozo", trips))
         island_label = "Malta"
         gc_label = "Gozo Channel — Ċirkewwa → Mġarr"
-        ff_label = "Fast Ferry — Valletta → Mġarr"
 
     mode_label = "with a car" if mode == "car" else "on foot"
     lines = [
@@ -664,25 +701,35 @@ async def _send_results(
     else:
         lines.append("  No more today")
 
-    # Fast Ferry (only for "on foot")
+    # Fast Ferry — multi-route (only for "on foot")
     if mode == "foot":
-        lines.append(f"\n⚡️ *{ff_label}* (~45 min)")
-        if ff_deps:
-            for i, t in enumerate(ff_deps):
-                prefix = "➡️" if i == 0 else "  •"
-                lines.append(format_fast_ferry_line(t, now, prefix))
-        else:
-            lines.append("  No more today")
+        if ff_routes:
+            lines.append("\n⚡️ *Fast Ferry* — passenger only")
+            for label, trips in ff_routes:
+                lines.append(f"\n_{label}:_")
+                for i, t in enumerate(trips):
+                    prefix = "➡️" if i == 0 else "  •"
+                    lines.append(format_fast_ferry_line(t, now, prefix))
 
-        # Warn if today's Fast Ferry schedule is unusually short
-        ff_dep, ff_arr = (
-            (FF_MGARR, FF_VALLETTA) if island == "gozo"
-            else (FF_VALLETTA, FF_MGARR)
-        )
-        if await is_fast_ferry_restricted(ff_dep, ff_arr, now.date()):
+            # Restricted-schedule check across any Malta route
+            any_restricted = False
+            for port in FF_MALTA_PORTS:
+                if island == "gozo":
+                    if await is_fast_ferry_restricted(FF_GOZO, port, now.date()):
+                        any_restricted = True
+                        break
+                else:
+                    if await is_fast_ferry_restricted(port, FF_GOZO, now.date()):
+                        any_restricted = True
+                        break
+            if any_restricted:
+                lines.append(
+                    "  _⚠️ Fast Ferry running a restricted schedule today — "
+                    "check gozohighspeed.com_"
+                )
+        else:
             lines.append(
-                "  _⚠️ Fast Ferry running a restricted schedule today — "
-                "check gozohighspeed.com_"
+                "\n⚡️ *Fast Ferry* — no passenger trips available right now"
             )
 
     conditions = await fetch_sea_conditions()
@@ -741,35 +788,59 @@ async def next_cirkewwa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def fastferry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     analytics.log_command("fastferry")
     now = datetime.now(MALTA_TZ)
-    to_gozo = await next_fast_ferry(FF_VALLETTA, FF_MGARR, now, limit=3)
-    to_valletta = await next_fast_ferry(FF_MGARR, FF_VALLETTA, now, limit=3)
 
-    lines = ["⚡️ *Gozo Fast Ferry* — passenger only (~45 min)\n"]
+    # Fetch all Malta-side routes in parallel-ish (each is cached anyway)
+    to_gozo: dict[str, list[dict]] = {}   # malta_port → trips
+    from_gozo: dict[str, list[dict]] = {} # malta_port → trips
+    for port in FF_MALTA_PORTS:
+        to_gozo[port] = await next_fast_ferry(port, FF_GOZO, now, limit=3)
+        from_gozo[port] = await next_fast_ferry(FF_GOZO, port, now, limit=3)
 
-    lines.append("*Valletta → Mġarr*")
-    if to_gozo:
-        for i, t in enumerate(to_gozo):
+    lines = ["⚡️ *Gozo Fast Ferry* — passenger only\n"]
+
+    # → Gozo direction
+    lines.append("*To Gozo*")
+    any_to_gozo = False
+    for port in FF_MALTA_PORTS:
+        trips = to_gozo[port]
+        if not trips:
+            continue
+        any_to_gozo = True
+        lines.append(f"\n_From {port}:_")
+        for i, t in enumerate(trips):
             prefix = "➡️" if i == 0 else "  •"
             lines.append(format_fast_ferry_line(t, now, prefix))
-    else:
-        lines.append("  No upcoming trips")
+    if not any_to_gozo:
+        lines.append("  No upcoming trips today.")
 
-    lines.append("\n*Mġarr → Valletta*")
-    if to_valletta:
-        for i, t in enumerate(to_valletta):
+    # ← from Gozo direction
+    lines.append("\n*From Gozo*")
+    any_from_gozo = False
+    for port in FF_MALTA_PORTS:
+        trips = from_gozo[port]
+        if not trips:
+            continue
+        any_from_gozo = True
+        lines.append(f"\n_To {port}:_")
+        for i, t in enumerate(trips):
             prefix = "➡️" if i == 0 else "  •"
             lines.append(format_fast_ferry_line(t, now, prefix))
-    else:
-        lines.append("  No upcoming trips")
+    if not any_from_gozo:
+        lines.append("  No upcoming trips today.")
 
     lines.append("\n_Bookings may be required — check gozohighspeed.com_")
 
-    # Restricted-schedule warnings (check both directions independently)
+    # Restricted-schedule warning (any Malta route)
     today = now.date()
-    if (
-        await is_fast_ferry_restricted(FF_VALLETTA, FF_MGARR, today)
-        or await is_fast_ferry_restricted(FF_MGARR, FF_VALLETTA, today)
-    ):
+    is_restricted = False
+    for port in FF_MALTA_PORTS:
+        if (
+            await is_fast_ferry_restricted(port, FF_GOZO, today)
+            or await is_fast_ferry_restricted(FF_GOZO, port, today)
+        ):
+            is_restricted = True
+            break
+    if is_restricted:
         lines.insert(
             1,
             "_⚠️ Restricted schedule today — fewer trips than usual._\n",
@@ -784,15 +855,11 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     now = datetime.now(MALTA_TZ)
     today_date = now.date()
 
+    # Gozo Channel today
     m_deps, meta = await get_gc_departures("mgarr_to_cirkewwa", today_date)
     c_deps, _ = await get_gc_departures("cirkewwa_to_mgarr", today_date)
     m_today = [d.strftime("%H:%M") for d in m_deps if d.date() == today_date]
     c_today = [d.strftime("%H:%M") for d in c_deps if d.date() == today_date]
-
-    ff_to_gozo = await fetch_fast_ferry(FF_VALLETTA, FF_MGARR, today_date) or []
-    ff_to_valletta = await fetch_fast_ferry(FF_MGARR, FF_VALLETTA, today_date) or []
-    ff_to_gozo_times = [t["departing"].strftime("%H:%M") for t in ff_to_gozo]
-    ff_to_valletta_times = [t["departing"].strftime("%H:%M") for t in ff_to_valletta]
 
     weekday_name = now.strftime("%A")
     parts = [
@@ -802,13 +869,26 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "",
         f"🛳 *Gozo Channel — Ċirkewwa → Mġarr* ({len(c_today)} trips)",
         ", ".join(c_today) or "—",
-        "",
-        f"⚡️ *Fast Ferry — Valletta → Mġarr* ({len(ff_to_gozo_times)} trips)",
-        ", ".join(ff_to_gozo_times) or "No service today",
-        "",
-        f"⚡️ *Fast Ferry — Mġarr → Valletta* ({len(ff_to_valletta_times)} trips)",
-        ", ".join(ff_to_valletta_times) or "No service today",
     ]
+
+    # Fast Ferry — all Malta-side ports, both directions
+    for port in FF_MALTA_PORTS:
+        ff_to_gozo = await fetch_fast_ferry(port, FF_GOZO, today_date) or []
+        ff_from_gozo = await fetch_fast_ferry(FF_GOZO, port, today_date) or []
+        if not ff_to_gozo and not ff_from_gozo:
+            continue  # skip ports with no service today (seasonal off)
+
+        to_times = [t["departing"].strftime("%H:%M") for t in ff_to_gozo]
+        from_times = [t["departing"].strftime("%H:%M") for t in ff_from_gozo]
+        parts.extend([
+            "",
+            f"⚡️ *Fast Ferry — {port} → Gozo* ({len(to_times)} trips)",
+            ", ".join(to_times) or "No service today",
+            "",
+            f"⚡️ *Fast Ferry — Gozo → {port}* ({len(from_times)} trips)",
+            ", ".join(from_times) or "No service today",
+        ])
+
     text = "\n".join(parts)
     if meta.get("source") == "fallback":
         text += "\n\n_⚠️ Gozo Channel: using fallback schedule._"
@@ -964,16 +1044,25 @@ async def _run_plan(update: Update, request_text: str) -> None:
                     }
                     for d in deps
                 ]
-            else:  # Fast Ferry
+            else:  # Fast Ferry — pick the right Malta port from the option
                 if origin_geo.on_gozo:
-                    ff_deps = await next_fast_ferry(FF_MGARR, FF_VALLETTA, ref_time, limit=8)
+                    # Gozo → Malta: Malta port is the destination
+                    malta_port = opt.to_terminal
+                    ff_deps = await next_fast_ferry(FF_GOZO, malta_port, ref_time, limit=8)
                 else:
-                    ff_deps = await next_fast_ferry(FF_VALLETTA, FF_MGARR, ref_time, limit=8)
+                    # Malta → Gozo: Malta port is the origin
+                    malta_port = opt.from_terminal
+                    ff_deps = await next_fast_ferry(malta_port, FF_GOZO, ref_time, limit=8)
+
+                if not ff_deps:
+                    continue  # skip Malta ports with no service today (seasonal off)
+
                 ferry_data[f"{opt.operator} ({opt.from_terminal} → {opt.to_terminal})"] = [
                     {
                         "departing": _fmt_dep(t["departing"]),
                         "vessel": t["vessel"] or None,
                         "seats_economy": t["seats"] if t["seats"] >= 0 else None,
+                        "transfer_at": t.get("transfer_at"),
                         "crossing_minutes": opt.crossing_minutes,
                     }
                     for t in ff_deps
