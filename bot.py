@@ -645,8 +645,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _run_plan(update, text)
         return
 
-    # Step 2: mode selection (island already known)
-    if pending and ("car" in text_lower or "foot" in text_lower):
+    # Step 2: mode selection (island already known) — only if message is short
+    # ("With a car", "On foot"). Don't catch longer messages that happen to
+    # contain "car" or "foot" by coincidence.
+    if pending and len(text) < 25 and (
+        "car" in text_lower or "foot" in text_lower
+    ):
         mode = "car" if "car" in text_lower else "foot"
         analytics.log_mode_choice(mode)
         location = context.user_data.get("pending_location")  # may be None
@@ -655,17 +659,62 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _send_results(update, pending, mode, location)
         return
 
-    # Step 1: island selection (manual, no location)
-    if "gozo" in text_lower:
-        context.user_data["pending_island"] = "gozo"
-        context.user_data.pop("pending_location", None)
-        analytics.log_island_pick("gozo", from_location=False)
-        await _ask_mode(update)
-    elif "malta" in text_lower:
-        context.user_data["pending_island"] = "malta"
-        context.user_data.pop("pending_location", None)
-        analytics.log_island_pick("malta", from_location=False)
-        await _ask_mode(update)
+    # Step 1: island selection (manual, no location) — same length guard so
+    # "I want to go from Gozo to Malta" doesn't get treated as island picker.
+    if not pending and len(text) < 20:
+        if "gozo" in text_lower and "malta" not in text_lower:
+            context.user_data["pending_island"] = "gozo"
+            context.user_data.pop("pending_location", None)
+            analytics.log_island_pick("gozo", from_location=False)
+            await _ask_mode(update)
+            return
+        if "malta" in text_lower and "gozo" not in text_lower:
+            context.user_data["pending_island"] = "malta"
+            context.user_data.pop("pending_location", None)
+            analytics.log_island_pick("malta", from_location=False)
+            await _ask_mode(update)
+            return
+
+    # Smart fallback: if the message looks like a travel question, route it
+    # to the AI planner. Otherwise show a short help message.
+    if _looks_like_travel_query(text_lower):
+        await _run_plan(update, text)
+        return
+
+    # Final fallback — gentle nudge with the most useful commands.
+    await update.message.reply_text(
+        "I didn't catch that. Try one of these:\n\n"
+        "• /next — next ferry from your location\n"
+        "• /plan _from X to Y by HH:MM_ — AI route planner\n"
+        "• /today — full schedule for today\n"
+        "• /sea — current sea conditions\n\n"
+        "Or just tell me where you're going (e.g. _from Sliema to Victoria by 14:00_).",
+        parse_mode="Markdown",
+    )
+
+
+# Heuristic: does this text look like a travel/planning question?
+# Used to route ambient messages (no command prefix) to the AI planner.
+def _looks_like_travel_query(text_lower: str) -> bool:
+    travel_signals = (
+        " to ", " from ", " in ", " by ",
+        "ferry", "ferries", "boat", "ferr ", "trip", "travel", "go to",
+        "get to", "reach", "arrive", "depart", "leave", "visit",
+        "i'm in", "im in", "i am in", "i need", "i want",
+        "tomorrow", "today", "tonight", "morning",
+        # Ukrainian / common multilingual
+        "до ", "из ", "з ", "до ",
+        # Times like "10:00", "14:30" — indicates a deadline
+    )
+    if any(s in text_lower for s in travel_signals):
+        return True
+    # Time-of-day pattern (HH:MM) is a strong signal
+    import re
+    if re.search(r"\b\d{1,2}:\d{2}\b", text_lower):
+        return True
+    if re.search(r"\b\d{1,2}\s*(am|pm)\b", text_lower):
+        return True
+    return False
 
 
 async def _send_results(
